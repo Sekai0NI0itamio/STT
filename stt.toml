@@ -1,0 +1,12 @@
+incoming_dir = "incoming"
+outputs_dir = "outputs"
+max_input_mb = 25
+sample_rate_hz = 16000
+audio_channels = 1
+chunk_seconds = 300
+max_parallel_files = 2
+backend = "faster-whisper"
+model = "small"
+emit_chunk_debug = false
+fail_on_any_error = true
+

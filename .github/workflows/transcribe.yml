@@ -1,0 +1,237 @@
+name: STT Transcribe
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_glob:
+        description: Optional glob relative to the repo root, for example incoming/**/*.mp3
+        required: false
+        type: string
+      max_parallel:
+        description: Maximum number of files to process in parallel
+        required: false
+        default: "2"
+        type: string
+      chunk_seconds:
+        description: Chunk size in seconds
+        required: false
+        default: "300"
+        type: string
+      model:
+        description: faster-whisper model size
+        required: false
+        default: small
+        type: choice
+        options:
+          - tiny
+          - base
+          - small
+          - medium
+      emit_chunk_debug:
+        description: Upload chunk-level transcript and debug files
+        required: false
+        default: false
+        type: boolean
+      fail_on_any_error:
+        description: Mark the overall run as failed if any input fails
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  discover:
+    name: Discover inputs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      count: ${{ steps.discover.outputs.count }}
+      max_parallel: ${{ steps.discover.outputs.max_parallel }}
+      fail_on_any_error: ${{ steps.discover.outputs.fail_on_any_error }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install STT package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Discover committed inputs
+        id: discover
+        run: |
+          python -m stt.cli discover \
+            --config stt.toml \
+            --file-glob "${{ inputs.file_glob }}" \
+            --max-parallel "${{ inputs.max_parallel }}" \
+            --chunk-seconds "${{ inputs.chunk_seconds }}" \
+            --model "${{ inputs.model }}" \
+            --emit-chunk-debug "${{ inputs.emit_chunk_debug }}" \
+            --fail-on-any-error "${{ inputs.fail_on_any_error }}" \
+            --manifest-out outputs/discovery/manifest.json \
+            --github-output-file "$GITHUB_OUTPUT"
+
+      - name: Upload discovery manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stt-discovery
+          path: outputs/discovery
+          retention-days: 14
+
+      - name: Fail early when nothing matched
+        run: |
+          if [ "${{ steps.discover.outputs.count }}" = "0" ]; then
+            {
+              echo "# STT Run Summary"
+              echo
+              echo "- Files discovered: 0"
+              echo "- No eligible .mp3 files matched the current filter."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+  process-file:
+    name: Process ${{ matrix.relpath }}
+    needs: discover
+    if: ${{ needs.discover.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.discover.outputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install STT runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install '.[runtime]'
+
+      - name: Restore model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/ctranslate2
+          key: ${{ runner.os }}-faster-whisper-${{ inputs.model }}
+
+      - name: Process input file
+        id: process
+        run: |
+          set +e
+          python -m stt.cli process-one \
+            --config stt.toml \
+            --input-relpath "${{ matrix.relpath }}" \
+            --job-output-dir outputs/job \
+            --chunk-seconds "${{ inputs.chunk_seconds }}" \
+            --model "${{ inputs.model }}" \
+            --emit-chunk-debug "${{ inputs.emit_chunk_debug }}" \
+            --fail-on-any-error "${{ inputs.fail_on_any_error }}"
+          exit_code=$?
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload per-file result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: outputs/job/${{ matrix.slug }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Replay file status
+        if: always()
+        run: exit ${{ steps.process.outputs.exit_code }}
+
+  summarize:
+    name: Summarize run
+    needs:
+      - discover
+      - process-file
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install STT package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Download per-file artifacts
+        if: ${{ needs.discover.outputs.count != '0' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stt-file-*
+          path: outputs/downloaded/per-file
+          merge-multiple: false
+
+      - name: Build run summary
+        id: summarize
+        run: |
+          set +e
+          python -m stt.cli summarize \
+            --config stt.toml \
+            --results-root outputs/downloaded/per-file \
+            --output-dir outputs/final \
+            --expected-count "${{ needs.discover.outputs.count }}" \
+            --chunk-seconds "${{ inputs.chunk_seconds }}" \
+            --model "${{ inputs.model }}" \
+            --fail-on-any-error "${{ inputs.fail_on_any_error }}"
+          exit_code=$?
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Assemble consolidated artifact
+        if: always()
+        run: |
+          mkdir -p outputs/final/per-file
+          if [ -d outputs/downloaded/per-file ]; then
+            cp -R outputs/downloaded/per-file/. outputs/final/per-file/
+          fi
+
+      - name: Upload consolidated artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stt-run-results
+          path: outputs/final
+          retention-days: 14
+
+      - name: Replay summary status
+        if: always()
+        run: exit ${{ steps.summarize.outputs.exit_code }}
+
