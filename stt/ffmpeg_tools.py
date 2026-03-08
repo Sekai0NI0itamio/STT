@@ -68,10 +68,42 @@ def extract_chunk(input_path: Path, output_path: Path, start_seconds: float, dur
     _run(command)
 
 
+def extract_chunk_mp3(
+    input_path: Path,
+    output_path: Path,
+    start_seconds: float,
+    duration_seconds: float,
+    sample_rate_hz: int,
+    audio_channels: int,
+    bitrate_kbps: int,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start_seconds:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-i",
+        str(input_path),
+        "-vn",
+        "-ac",
+        str(audio_channels),
+        "-ar",
+        str(sample_rate_hz),
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        f"{bitrate_kbps}k",
+        str(output_path),
+    ]
+    _run(command)
+
+
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip()
         raise FFmpegError(f"Command failed: {' '.join(command)}\n{stderr}")
     return completed
-

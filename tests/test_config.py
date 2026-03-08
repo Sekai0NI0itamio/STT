@@ -20,6 +20,11 @@ class ConfigTests(unittest.TestCase):
                     outputs_dir = "artifacts"
                     max_input_mb = 40
                     chunk_seconds = 120
+                    chunk_bitrate_kbps = 48
+                    min_silence_len_ms = 700
+                    silence_thresh_dbfs = -35
+                    keep_silence_ms = 250
+                    chunk_size_safety_margin = 0.8
                     model = "base"
                     emit_chunk_debug = false
                     fail_on_any_error = true
@@ -42,6 +47,11 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.incoming_dir, Path("audio"))
             self.assertEqual(config.outputs_dir, Path("artifacts"))
             self.assertEqual(config.chunk_seconds, 90)
+            self.assertEqual(config.chunk_bitrate_kbps, 48)
+            self.assertEqual(config.min_silence_len_ms, 700)
+            self.assertEqual(config.silence_thresh_dbfs, -35)
+            self.assertEqual(config.keep_silence_ms, 250)
+            self.assertEqual(config.chunk_size_safety_margin, 0.8)
             self.assertTrue(config.emit_chunk_debug)
             self.assertFalse(config.fail_on_any_error)
             self.assertEqual(config.max_input_bytes, 40 * 1024 * 1024)
@@ -49,4 +59,3 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

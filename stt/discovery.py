@@ -25,18 +25,12 @@ def discover_inputs(config: STTConfig, file_glob: str | None = None) -> list[Inp
         if file_glob and not matches_file_glob(relpath, file_glob):
             continue
         size_bytes = path.stat().st_size
-        validation_errors: list[str] = []
-        if size_bytes > config.max_input_bytes:
-            validation_errors.append(
-                f"Input file exceeds max_input_mb={config.max_input_mb}: {size_bytes} bytes"
-            )
         candidates.append(
             InputCandidate(
                 relpath=relpath,
                 abs_path=path.resolve(),
                 size_bytes=size_bytes,
                 slug=build_slug(relpath),
-                validation_errors=validation_errors,
             )
         )
 

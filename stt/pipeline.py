@@ -6,10 +6,10 @@ from typing import Any
 import shutil
 
 from .backend_factory import build_backend
-from .chunking import merge_chunk_texts, plan_chunks
+from .chunking import build_chunk_plans, merge_chunk_texts
 from .config import STTConfig
 from .discovery import build_slug
-from .ffmpeg_tools import FFmpegError, extract_chunk, normalize_audio, probe_duration_seconds
+from .ffmpeg_tools import FFmpegError, extract_chunk_mp3, normalize_audio, probe_duration_seconds
 from .logging_utils import configure_file_logger
 from .models import ChunkResult, PipelineStatus
 from .utils import utcnow_iso, write_json, write_text
@@ -79,13 +79,20 @@ def process_one_input(
             "retained_in_artifact": False,
         }
 
-        chunk_plan = plan_chunks(audio_duration_seconds, config.chunk_seconds)
+        chunk_plan, chunking_metadata = build_chunk_plans(normalized_path, config)
         metadata["planned_chunks"] = [chunk.to_dict() for chunk in chunk_plan]
+        metadata["chunking"] = chunking_metadata
         backend = build_backend(config)
         logger.info("Loaded backend=%s model=%s", config.backend, config.model)
+        logger.info(
+            "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s",
+            len(chunk_plan),
+            chunking_metadata["max_chunk_duration_ms"],
+        )
 
         for chunk in chunk_plan:
-            chunk_audio_path = work_root / "chunks" / f"{chunk.chunk_id}.wav"
+            chunk_audio_path = work_root / "chunks" / f"{chunk.chunk_id}.mp3"
+            retained_chunk_audio_path = None
             logger.info(
                 "Processing chunk %s start=%.3fs duration=%.3fs",
                 chunk.chunk_id,
@@ -93,12 +100,27 @@ def process_one_input(
                 chunk.duration_seconds,
             )
             try:
-                extract_chunk(
+                extract_chunk_mp3(
                     input_path=normalized_path,
                     output_path=chunk_audio_path,
                     start_seconds=chunk.start_seconds,
                     duration_seconds=chunk.duration_seconds,
+                    sample_rate_hz=config.sample_rate_hz,
+                    audio_channels=config.audio_channels,
+                    bitrate_kbps=config.chunk_bitrate_kbps,
                 )
+                audio_size_bytes = chunk_audio_path.stat().st_size
+                if audio_size_bytes > config.max_input_bytes:
+                    raise PipelineStageError(
+                        "chunking",
+                        (
+                            f"{chunk.chunk_id} exceeded max_input_mb={config.max_input_mb} "
+                            f"after export: {audio_size_bytes} bytes"
+                        ),
+                    )
+                if config.emit_chunk_debug:
+                    retained_chunk_audio_path = f"chunks/{chunk.chunk_id}.mp3"
+                    shutil.copy2(chunk_audio_path, file_root / retained_chunk_audio_path)
                 transcription = backend.transcribe(chunk_audio_path)
                 text = transcription.text.strip()
                 transcript_debug_path = None
@@ -115,6 +137,8 @@ def process_one_input(
                         start_seconds=chunk.start_seconds,
                         duration_seconds=chunk.duration_seconds,
                         status="success",
+                        audio_path=retained_chunk_audio_path,
+                        audio_size_bytes=audio_size_bytes,
                         transcript_text=text,
                         transcript_path=transcript_debug_path,
                         language=transcription.language,
@@ -135,6 +159,8 @@ def process_one_input(
                         start_seconds=chunk.start_seconds,
                         duration_seconds=chunk.duration_seconds,
                         status="failed",
+                        audio_path=retained_chunk_audio_path,
+                        audio_size_bytes=chunk_audio_path.stat().st_size if chunk_audio_path.exists() else 0,
                         error_message=str(exc),
                     )
                 )
@@ -211,12 +237,6 @@ def _validate_input(config: STTConfig, input_path: Path) -> None:
         raise PipelineStageError("input_validation", f"Input file does not exist: {input_path}")
     if input_path.suffix.lower() != ".mp3":
         raise PipelineStageError("input_validation", f"Only .mp3 files are supported: {input_path}")
-    size_bytes = input_path.stat().st_size
-    if size_bytes > config.max_input_bytes:
-        raise PipelineStageError(
-            "input_validation",
-            f"Input file exceeds max_input_mb={config.max_input_mb}: {size_bytes} bytes",
-        )
 
 
 def _serialize_chunk_result(result: ChunkResult, include_text: bool) -> dict[str, Any]:

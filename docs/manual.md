@@ -2,7 +2,7 @@
 
 ## Overview
 
-STT is a GitHub-only batch transcription scaffold for small committed `.mp3` files. The intended usage is:
+STT is a GitHub-only batch transcription scaffold for committed `.mp3` files. The intended usage is:
 
 1. Commit audio files into `incoming/`.
 2. Push the repository to GitHub.
@@ -33,8 +33,9 @@ Each input file gets its own matrix job.
 - `strategy.max-parallel` controls how many files run concurrently.
 - `ffmpeg` normalizes the source to mono 16 kHz WAV.
 - `ffprobe` measures duration.
-- The pipeline plans fixed-size chunks with no overlap in v1.
-- Each chunk is extracted to WAV and transcribed with `faster-whisper`.
+- `pydub` inspects the normalized audio and finds likely speech regions separated by silence.
+- STT groups those regions into chunk windows that stay under both the configured duration cap and the configured chunk-size ceiling.
+- Each chunk is exported as a normalized sub-`.mp3` file and transcribed with `faster-whisper`.
 - Chunk failures are recorded and later chunks are still attempted.
 - If any chunk fails, the file is marked failed and no final per-file transcript is emitted.
 - The job always uploads its artifact folder before replaying the final exit status.
@@ -53,8 +54,8 @@ STT v1 expects committed `.mp3` files only.
 
 - Files must live under `incoming/` or one of its subdirectories.
 - Non-`.mp3` files are ignored.
-- Oversize `.mp3` files are discovered, then marked failed during input validation with a clear error.
-- The default input size limit is `25 MB`, configured by `max_input_mb` in `stt.toml`.
+- Larger source `.mp3` files are allowed. STT splits them into smaller transcription chunks automatically.
+- The default chunk-size ceiling is `25 MB`, configured by `max_input_mb` in `stt.toml`.
 
 Example input layout:
 
@@ -76,6 +77,11 @@ max_input_mb = 25
 sample_rate_hz = 16000
 audio_channels = 1
 chunk_seconds = 300
+chunk_bitrate_kbps = 64
+min_silence_len_ms = 500
+silence_thresh_dbfs = -40
+keep_silence_ms = 500
+chunk_size_safety_margin = 0.9
 max_parallel_files = 2
 backend = "faster-whisper"
 model = "small"
@@ -91,6 +97,15 @@ Workflow-dispatch inputs can override the most useful run-time knobs:
 - `model`
 - `emit_chunk_debug`
 - `fail_on_any_error`
+
+Advanced chunking controls stay in `stt.toml`:
+
+- `max_input_mb`: maximum size for each intermediate transcription chunk `.mp3`
+- `chunk_bitrate_kbps`: target bitrate for normalized chunk exports
+- `min_silence_len_ms`: minimum silence length used to detect likely speaker pauses
+- `silence_thresh_dbfs`: silence threshold for `pydub`
+- `keep_silence_ms`: silence padding retained around chunk edges
+- `chunk_size_safety_margin`: extra headroom below the configured chunk-size ceiling
 
 ## Output contract
 
@@ -109,6 +124,7 @@ Each matrix job uploads a folder shaped like this:
     process.log
   chunks/
     chunk-manifest.json
+    chunk-0000.mp3             # only when emit_chunk_debug=true
     chunk-0000.txt             # only when emit_chunk_debug=true
     chunk-0000.json            # only when emit_chunk_debug=true
 ```
@@ -124,7 +140,7 @@ Each matrix job uploads a folder shaped like this:
 
 `metadata.json` adds the config snapshot, chunk plan, and artifact references.
 
-Temporary working WAV files are created during normalization and chunking, but they are deleted before artifact upload so the artifacts stay focused on logs, manifests, and transcript outputs.
+Temporary working WAV files are created during normalization and silence analysis, but they are deleted before artifact upload so the artifacts stay focused on logs, manifests, and transcript outputs. When `emit_chunk_debug=true`, the exported sub-`.mp3` chunk files are retained for inspection.
 
 ### Run-level artifact structure
 
@@ -166,7 +182,7 @@ The failure strategy is explicit.
 
 Common failure stages:
 
-- `input_validation`: missing file, wrong extension, or size limit exceeded
+- `input_validation`: missing file or wrong extension
 - `normalization`: `ffmpeg` or `ffprobe` failed before chunking
 - `chunking`: chunk extraction failed
 - `transcription`: backend transcription failed for one or more chunks
@@ -231,12 +247,12 @@ This repo keeps a backend seam so future backends can replace the transcribe ste
 - Read `logs/process.log`.
 - Check `status.json` and `metadata.json`.
 - Look for `input_validation` or `normalization` failures.
-- Confirm the file is within the configured size limit.
+- If chunking failed, inspect the chunk metadata in `metadata.json` and `chunks/chunk-manifest.json`.
 
 ### Some chunks failed
 
 - Inspect `chunks/chunk-manifest.json`.
-- If `emit_chunk_debug=true`, inspect the chunk-level `.json` and `.txt` files.
+- If `emit_chunk_debug=true`, inspect the chunk-level `.mp3`, `.json`, and `.txt` files.
 - Re-run the failed job from GitHub Actions after adjusting the model or chunk size if needed.
 
 ### The run is red even though some transcripts exist

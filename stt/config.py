@@ -15,6 +15,11 @@ class STTConfig:
     sample_rate_hz: int = 16000
     audio_channels: int = 1
     chunk_seconds: int = 300
+    chunk_bitrate_kbps: int = 64
+    min_silence_len_ms: int = 500
+    silence_thresh_dbfs: int = -40
+    keep_silence_ms: int = 500
+    chunk_size_safety_margin: float = 0.9
     max_parallel_files: int = 2
     backend: str = "faster-whisper"
     model: str = "small"
@@ -66,6 +71,11 @@ def load_config(
         "sample_rate_hz": int(raw.get("sample_rate_hz", 16000)),
         "audio_channels": int(raw.get("audio_channels", 1)),
         "chunk_seconds": int(raw.get("chunk_seconds", 300)),
+        "chunk_bitrate_kbps": int(raw.get("chunk_bitrate_kbps", 64)),
+        "min_silence_len_ms": int(raw.get("min_silence_len_ms", 500)),
+        "silence_thresh_dbfs": int(raw.get("silence_thresh_dbfs", -40)),
+        "keep_silence_ms": int(raw.get("keep_silence_ms", 500)),
+        "chunk_size_safety_margin": float(raw.get("chunk_size_safety_margin", 0.9)),
         "max_parallel_files": int(raw.get("max_parallel_files", 2)),
         "backend": str(raw.get("backend", "faster-whisper")),
         "model": str(raw.get("model", "small")),
@@ -84,9 +94,15 @@ def load_config(
                 "sample_rate_hz",
                 "audio_channels",
                 "chunk_seconds",
+                "chunk_bitrate_kbps",
+                "min_silence_len_ms",
+                "silence_thresh_dbfs",
+                "keep_silence_ms",
                 "max_parallel_files",
             }:
                 values[key] = int(value)
+            elif key == "chunk_size_safety_margin":
+                values[key] = float(value)
             elif key in {"emit_chunk_debug", "fail_on_any_error"}:
                 values[key] = _as_bool(value)
             else:
@@ -122,6 +138,14 @@ def _validate_config(config: STTConfig) -> None:
         raise ValueError("audio_channels must be greater than zero")
     if config.max_parallel_files <= 0:
         raise ValueError("max_parallel_files must be greater than zero")
+    if config.chunk_bitrate_kbps <= 0:
+        raise ValueError("chunk_bitrate_kbps must be greater than zero")
+    if config.min_silence_len_ms <= 0:
+        raise ValueError("min_silence_len_ms must be greater than zero")
+    if config.keep_silence_ms < 0:
+        raise ValueError("keep_silence_ms must be zero or greater")
+    if not 0 < config.chunk_size_safety_margin <= 1:
+        raise ValueError("chunk_size_safety_margin must be between 0 and 1")
     if not config.backend:
         raise ValueError("backend must be set")
     if not config.model:

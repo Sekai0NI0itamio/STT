@@ -10,7 +10,7 @@ from stt.discovery import discover_inputs
 
 
 class DiscoveryTests(unittest.TestCase):
-    def test_recursive_discovery_and_size_validation(self) -> None:
+    def test_recursive_discovery_without_rejecting_large_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "incoming" / "nested").mkdir(parents=True)
@@ -42,8 +42,8 @@ class DiscoveryTests(unittest.TestCase):
                 ],
             )
             oversize = next(candidate for candidate in discovered if candidate.relpath.endswith("too-big.mp3"))
-            self.assertFalse(oversize.is_valid)
-            self.assertIn("max_input_mb=1", oversize.validation_errors[0])
+            self.assertTrue(oversize.is_valid)
+            self.assertEqual(oversize.validation_errors, [])
 
             filtered = discover_inputs(config, file_glob="incoming/nested/*")
             self.assertEqual([candidate.relpath for candidate in filtered], ["incoming/nested/a.MP3"])

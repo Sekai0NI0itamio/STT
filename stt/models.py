@@ -49,6 +49,8 @@ class ChunkResult:
     start_seconds: float
     duration_seconds: float
     status: str
+    audio_path: str | None = None
+    audio_size_bytes: int = 0
     transcript_text: str = ""
     transcript_path: str | None = None
     error_message: str | None = None
@@ -92,4 +94,3 @@ class TranscriptionResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
