@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -30,19 +31,29 @@ def build_chunk_plans(
 ) -> tuple[list[ChunkPlan], dict[str, object]]:
     audio, duration_ms = load_audio(normalized_audio_path)
     max_duration_ms = calculate_max_chunk_duration_ms(config)
+    target_duration_ms = calculate_target_chunk_duration_ms(config, max_duration_ms)
+    min_duration_ms = calculate_min_chunk_duration_ms(config, target_duration_ms)
     raw_ranges = detect_nonsilent_ranges(
         audio_segment=audio,
         min_silence_len_ms=config.min_silence_len_ms,
         silence_thresh_dbfs=config.silence_thresh_dbfs,
     )
     expanded_ranges = expand_ranges(raw_ranges, duration_ms, config.keep_silence_ms)
-    ranges = group_ranges_into_chunks(expanded_ranges, duration_ms, max_duration_ms)
+    ranges = group_ranges_into_chunks(
+        speech_ranges_ms=expanded_ranges,
+        total_duration_ms=duration_ms,
+        target_chunk_duration_ms=target_duration_ms,
+        max_chunk_duration_ms=max_duration_ms,
+        min_chunk_duration_ms=min_duration_ms,
+    )
     metadata = {
-        "strategy": "silence-aware-mp3",
+        "strategy": "silence-aware-short-clips",
         "duration_ms": duration_ms,
         "raw_speech_ranges_ms": [[start, end] for start, end in raw_ranges],
         "expanded_speech_ranges_ms": [[start, end] for start, end in expanded_ranges],
+        "target_chunk_duration_ms": target_duration_ms,
         "max_chunk_duration_ms": max_duration_ms,
+        "min_chunk_duration_ms": min_duration_ms,
         "target_chunk_size_mb": config.max_input_mb,
         "target_chunk_bitrate_kbps": config.chunk_bitrate_kbps,
         "chunk_size_safety_margin": config.chunk_size_safety_margin,
@@ -62,6 +73,14 @@ def calculate_max_chunk_duration_ms(config: STTConfig) -> int:
     return min(duration_from_bitrate, config.chunk_seconds * 1000)
 
 
+def calculate_target_chunk_duration_ms(config: STTConfig, max_duration_ms: int) -> int:
+    return min(config.chunk_target_seconds * 1000, max_duration_ms)
+
+
+def calculate_min_chunk_duration_ms(config: STTConfig, target_duration_ms: int) -> int:
+    return min(config.chunk_min_seconds * 1000, target_duration_ms)
+
+
 def max_chunk_duration_ms(max_chunk_bytes: int, bitrate_kbps: int, safety_margin: float) -> int:
     if max_chunk_bytes <= 0:
         raise ValueError("max_chunk_bytes must be greater than zero")
@@ -78,16 +97,26 @@ def max_chunk_duration_ms(max_chunk_bytes: int, bitrate_kbps: int, safety_margin
 def group_ranges_into_chunks(
     speech_ranges_ms: Iterable[tuple[int, int]],
     total_duration_ms: int,
+    target_chunk_duration_ms: int,
     max_chunk_duration_ms: int,
+    min_chunk_duration_ms: int,
 ) -> list[tuple[int, int]]:
     if total_duration_ms <= 0:
         raise ValueError("total_duration_ms must be greater than zero")
+    if target_chunk_duration_ms <= 0:
+        raise ValueError("target_chunk_duration_ms must be greater than zero")
     if max_chunk_duration_ms <= 0:
         raise ValueError("max_chunk_duration_ms must be greater than zero")
+    if min_chunk_duration_ms <= 0:
+        raise ValueError("min_chunk_duration_ms must be greater than zero")
+    if target_chunk_duration_ms > max_chunk_duration_ms:
+        raise ValueError("target_chunk_duration_ms cannot exceed max_chunk_duration_ms")
+    if min_chunk_duration_ms > target_chunk_duration_ms:
+        raise ValueError("min_chunk_duration_ms cannot exceed target_chunk_duration_ms")
 
     normalized_ranges = _normalize_ranges(speech_ranges_ms, total_duration_ms)
     if not normalized_ranges:
-        return _split_range(0, total_duration_ms, max_chunk_duration_ms)
+        return _split_range_evenly(0, total_duration_ms, target_chunk_duration_ms, max_chunk_duration_ms)
 
     chunks: list[tuple[int, int]] = []
     current_start: int | None = None
@@ -98,15 +127,48 @@ def group_ranges_into_chunks(
             current_start, current_end = start_ms, end_ms
             continue
 
-        if end_ms - current_start <= max_chunk_duration_ms:
+        current_duration_ms = current_end - current_start
+        candidate_duration_ms = end_ms - current_start
+
+        if candidate_duration_ms <= target_chunk_duration_ms:
             current_end = end_ms
             continue
 
-        chunks.extend(_split_range(current_start, current_end, max_chunk_duration_ms))
+        if current_duration_ms >= min_chunk_duration_ms:
+            chunks.extend(
+                _split_range_evenly(
+                    current_start,
+                    current_end,
+                    target_chunk_duration_ms,
+                    max_chunk_duration_ms,
+                )
+            )
+            current_start, current_end = start_ms, end_ms
+            continue
+
+        if candidate_duration_ms <= max_chunk_duration_ms:
+            current_end = end_ms
+            continue
+
+        chunks.extend(
+            _split_range_evenly(
+                current_start,
+                current_end,
+                target_chunk_duration_ms,
+                max_chunk_duration_ms,
+            )
+        )
         current_start, current_end = start_ms, end_ms
 
     if current_start is not None and current_end is not None:
-        chunks.extend(_split_range(current_start, current_end, max_chunk_duration_ms))
+        chunks.extend(
+            _split_range_evenly(
+                current_start,
+                current_end,
+                target_chunk_duration_ms,
+                max_chunk_duration_ms,
+            )
+        )
 
     return chunks
 
@@ -208,4 +270,34 @@ def _split_range(start_ms: int, end_ms: int, max_chunk_duration_ms: int) -> list
         next_end = min(cursor + max_chunk_duration_ms, end_ms)
         chunks.append((cursor, next_end))
         cursor = next_end
+    return chunks
+
+
+def _split_range_evenly(
+    start_ms: int,
+    end_ms: int,
+    target_chunk_duration_ms: int,
+    max_chunk_duration_ms: int,
+) -> list[tuple[int, int]]:
+    duration_ms = end_ms - start_ms
+    if duration_ms <= 0:
+        return []
+    if duration_ms <= max_chunk_duration_ms:
+        return [(start_ms, end_ms)]
+
+    min_chunk_count = math.ceil(duration_ms / max_chunk_duration_ms)
+    preferred_chunk_count = math.ceil(duration_ms / target_chunk_duration_ms)
+    chunk_count = max(min_chunk_count, preferred_chunk_count)
+    chunk_size_ms = math.ceil(duration_ms / chunk_count)
+
+    chunks: list[tuple[int, int]] = []
+    cursor = start_ms
+    for index in range(chunk_count):
+        remaining_chunks = chunk_count - index
+        remaining_ms = end_ms - cursor
+        next_size_ms = math.ceil(remaining_ms / remaining_chunks)
+        next_end = min(cursor + max(chunk_size_ms, next_size_ms), end_ms)
+        chunks.append((cursor, next_end))
+        cursor = next_end
+
     return chunks

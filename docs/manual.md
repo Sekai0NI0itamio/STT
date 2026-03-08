@@ -34,7 +34,7 @@ Each input file gets its own matrix job.
 - `ffmpeg` normalizes the source to mono 16 kHz WAV.
 - `ffprobe` measures duration.
 - `pydub` inspects the normalized audio and finds likely speech regions separated by silence.
-- STT groups those regions into chunk windows that stay under both the configured duration cap and the configured chunk-size ceiling.
+- STT groups those regions into short chunk windows, aiming for about 45 seconds, keeping normal clips in the 30 to 60 second range, and staying under the configured chunk-size ceiling.
 - Each chunk is exported as a normalized sub-`.mp3` file and transcribed with `faster-whisper`.
 - Chunk extraction and chunk transcription run concurrently through a worker pool inside the file job. The default worker mode is `unlimited`, which means all planned chunks for that file are scheduled at once.
 - Chunk failures are recorded and later chunks are still attempted.
@@ -77,7 +77,9 @@ outputs_dir = "outputs"
 max_input_mb = 25
 sample_rate_hz = 16000
 audio_channels = 1
-chunk_seconds = 300
+chunk_seconds = 60
+chunk_target_seconds = 45
+chunk_min_seconds = 30
 chunk_bitrate_kbps = 64
 min_silence_len_ms = 500
 silence_thresh_dbfs = -40
@@ -103,6 +105,9 @@ Workflow-dispatch inputs can override the most useful run-time knobs:
 
 Advanced chunking controls stay in `stt.toml`:
 
+- `chunk_seconds`: hard maximum length for each chunk
+- `chunk_target_seconds`: preferred cut target when silence boundaries allow it
+- `chunk_min_seconds`: soft minimum chunk length before STT tries to merge across the next silence
 - `max_input_mb`: maximum size for each intermediate transcription chunk `.mp3`
 - `chunk_bitrate_kbps`: target bitrate for normalized chunk exports
 - `min_silence_len_ms`: minimum silence length used to detect likely speaker pauses

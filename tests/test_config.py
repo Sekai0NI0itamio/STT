@@ -19,7 +19,9 @@ class ConfigTests(unittest.TestCase):
                     incoming_dir = "audio"
                     outputs_dir = "artifacts"
                     max_input_mb = 40
-                    chunk_seconds = 120
+                    chunk_seconds = 60
+                    chunk_target_seconds = 45
+                    chunk_min_seconds = 30
                     chunk_bitrate_kbps = 48
                     min_silence_len_ms = 700
                     silence_thresh_dbfs = -35
@@ -40,6 +42,8 @@ class ConfigTests(unittest.TestCase):
                 config_path,
                 overrides={
                     "chunk_seconds": 90,
+                    "chunk_target_seconds": 40,
+                    "chunk_min_seconds": 25,
                     "emit_chunk_debug": "true",
                     "fail_on_any_error": "false",
                     "chunk_workers": "unlimited",
@@ -50,6 +54,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.incoming_dir, Path("audio"))
             self.assertEqual(config.outputs_dir, Path("artifacts"))
             self.assertEqual(config.chunk_seconds, 90)
+            self.assertEqual(config.chunk_target_seconds, 40)
+            self.assertEqual(config.chunk_min_seconds, 25)
             self.assertEqual(config.chunk_bitrate_kbps, 48)
             self.assertEqual(config.min_silence_len_ms, 700)
             self.assertEqual(config.silence_thresh_dbfs, -35)

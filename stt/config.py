@@ -16,7 +16,9 @@ class STTConfig:
     max_input_mb: int = 25
     sample_rate_hz: int = 16000
     audio_channels: int = 1
-    chunk_seconds: int = 300
+    chunk_seconds: int = 60
+    chunk_target_seconds: int = 45
+    chunk_min_seconds: int = 30
     chunk_bitrate_kbps: int = 64
     min_silence_len_ms: int = 500
     silence_thresh_dbfs: int = -40
@@ -73,7 +75,9 @@ def load_config(
         "max_input_mb": int(raw.get("max_input_mb", 25)),
         "sample_rate_hz": int(raw.get("sample_rate_hz", 16000)),
         "audio_channels": int(raw.get("audio_channels", 1)),
-        "chunk_seconds": int(raw.get("chunk_seconds", 300)),
+        "chunk_seconds": int(raw.get("chunk_seconds", 60)),
+        "chunk_target_seconds": int(raw.get("chunk_target_seconds", 45)),
+        "chunk_min_seconds": int(raw.get("chunk_min_seconds", 30)),
         "chunk_bitrate_kbps": int(raw.get("chunk_bitrate_kbps", 64)),
         "min_silence_len_ms": int(raw.get("min_silence_len_ms", 500)),
         "silence_thresh_dbfs": int(raw.get("silence_thresh_dbfs", -40)),
@@ -98,6 +102,8 @@ def load_config(
                 "sample_rate_hz",
                 "audio_channels",
                 "chunk_seconds",
+                "chunk_target_seconds",
+                "chunk_min_seconds",
                 "chunk_bitrate_kbps",
                 "min_silence_len_ms",
                 "silence_thresh_dbfs",
@@ -135,6 +141,14 @@ def _as_bool(value: Any) -> bool:
 def _validate_config(config: STTConfig) -> None:
     if config.chunk_seconds <= 0:
         raise ValueError("chunk_seconds must be greater than zero")
+    if config.chunk_target_seconds <= 0:
+        raise ValueError("chunk_target_seconds must be greater than zero")
+    if config.chunk_min_seconds <= 0:
+        raise ValueError("chunk_min_seconds must be greater than zero")
+    if config.chunk_min_seconds > config.chunk_target_seconds:
+        raise ValueError("chunk_min_seconds cannot exceed chunk_target_seconds")
+    if config.chunk_target_seconds > config.chunk_seconds:
+        raise ValueError("chunk_target_seconds cannot exceed chunk_seconds")
     if config.max_input_mb <= 0:
         raise ValueError("max_input_mb must be greater than zero")
     if config.sample_rate_hz <= 0:

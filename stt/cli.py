@@ -49,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_common_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default="stt.toml")
     parser.add_argument("--chunk-seconds", type=int)
+    parser.add_argument("--chunk-target-seconds", type=int)
+    parser.add_argument("--chunk-min-seconds", type=int)
     parser.add_argument("--chunk-workers", type=parse_parallel_setting)
     parser.add_argument("--model")
     parser.add_argument("--emit-chunk-debug")
@@ -105,6 +107,8 @@ def _run_summarize(args: argparse.Namespace) -> int:
 def _load_config_from_args(args: argparse.Namespace):
     overrides = {
         "chunk_seconds": getattr(args, "chunk_seconds", None),
+        "chunk_target_seconds": getattr(args, "chunk_target_seconds", None),
+        "chunk_min_seconds": getattr(args, "chunk_min_seconds", None),
         "model": getattr(args, "model", None),
         "emit_chunk_debug": getattr(args, "emit_chunk_debug", None),
         "fail_on_any_error": getattr(args, "fail_on_any_error", None),

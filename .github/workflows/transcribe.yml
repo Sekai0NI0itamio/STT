@@ -32,9 +32,9 @@ on:
           - "8"
           - "16"
       chunk_seconds:
-        description: Hard cap for each silence-aware transcription chunk in seconds
+        description: Maximum silence-aware chunk length in seconds
         required: false
-        default: "300"
+        default: "60"
         type: string
       model:
         description: faster-whisper model size
