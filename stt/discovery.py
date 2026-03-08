@@ -6,6 +6,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+from .concurrency import resolve_parallel_workers
 from .config import STTConfig
 from .models import InputCandidate
 
@@ -75,10 +76,11 @@ def build_discovery_manifest(
     max_parallel: int | None = None,
 ) -> dict[str, object]:
     inputs = discover_inputs(config, file_glob=file_glob)
+    configured_max_parallel = config.max_parallel_files if max_parallel is None else max_parallel
     manifest = {
         "include": [candidate.to_manifest_dict() for candidate in inputs],
         "count": len(inputs),
-        "max_parallel": max_parallel or config.max_parallel_files,
+        "max_parallel": resolve_parallel_workers(configured_max_parallel, len(inputs)),
         "fail_on_any_error": config.fail_on_any_error,
     }
     return manifest

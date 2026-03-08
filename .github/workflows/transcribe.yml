@@ -10,8 +10,27 @@ on:
       max_parallel:
         description: Maximum number of files to process in parallel
         required: false
-        default: "2"
-        type: string
+        default: unlimited
+        type: choice
+        options:
+          - unlimited
+          - "1"
+          - "2"
+          - "4"
+          - "8"
+          - "16"
+      chunk_workers:
+        description: Maximum concurrent chunk workers inside each file job
+        required: false
+        default: unlimited
+        type: choice
+        options:
+          - unlimited
+          - "1"
+          - "2"
+          - "4"
+          - "8"
+          - "16"
       chunk_seconds:
         description: Hard cap for each silence-aware transcription chunk in seconds
         required: false
@@ -77,6 +96,7 @@ jobs:
             --file-glob "${{ inputs.file_glob }}" \
             --max-parallel "${{ inputs.max_parallel }}" \
             --chunk-seconds "${{ inputs.chunk_seconds }}" \
+            --chunk-workers "${{ inputs.chunk_workers }}" \
             --model "${{ inputs.model }}" \
             --emit-chunk-debug "${{ inputs.emit_chunk_debug }}" \
             --fail-on-any-error "${{ inputs.fail_on_any_error }}" \
@@ -149,6 +169,7 @@ jobs:
             --input-relpath "${{ matrix.relpath }}" \
             --job-output-dir outputs/job \
             --chunk-seconds "${{ inputs.chunk_seconds }}" \
+            --chunk-workers "${{ inputs.chunk_workers }}" \
             --model "${{ inputs.model }}" \
             --emit-chunk-debug "${{ inputs.emit_chunk_debug }}" \
             --fail-on-any-error "${{ inputs.fail_on_any_error }}"
@@ -209,6 +230,7 @@ jobs:
             --output-dir outputs/final \
             --expected-count "${{ needs.discover.outputs.count }}" \
             --chunk-seconds "${{ inputs.chunk_seconds }}" \
+            --chunk-workers "${{ inputs.chunk_workers }}" \
             --model "${{ inputs.model }}" \
             --fail-on-any-error "${{ inputs.fail_on_any_error }}"
           exit_code=$?

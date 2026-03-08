@@ -53,6 +53,7 @@ class ChunkResult:
     audio_size_bytes: int = 0
     transcript_text: str = ""
     transcript_path: str | None = None
+    error_stage: str | None = None
     error_message: str | None = None
     language: str | None = None
     language_probability: float | None = None

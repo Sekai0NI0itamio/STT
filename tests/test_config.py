@@ -25,6 +25,8 @@ class ConfigTests(unittest.TestCase):
                     silence_thresh_dbfs = -35
                     keep_silence_ms = 250
                     chunk_size_safety_margin = 0.8
+                    max_parallel_files = "unlimited"
+                    chunk_workers = 4
                     model = "base"
                     emit_chunk_debug = false
                     fail_on_any_error = true
@@ -40,6 +42,7 @@ class ConfigTests(unittest.TestCase):
                     "chunk_seconds": 90,
                     "emit_chunk_debug": "true",
                     "fail_on_any_error": "false",
+                    "chunk_workers": "unlimited",
                 },
             )
 
@@ -52,6 +55,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.silence_thresh_dbfs, -35)
             self.assertEqual(config.keep_silence_ms, 250)
             self.assertEqual(config.chunk_size_safety_margin, 0.8)
+            self.assertEqual(config.max_parallel_files, 0)
+            self.assertEqual(config.chunk_workers, 0)
             self.assertTrue(config.emit_chunk_debug)
             self.assertFalse(config.fail_on_any_error)
             self.assertEqual(config.max_input_bytes, 40 * 1024 * 1024)

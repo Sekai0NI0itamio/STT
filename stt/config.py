@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 import tomllib
 
+from .concurrency import parse_parallel_setting
+
 
 @dataclass(frozen=True, slots=True)
 class STTConfig:
@@ -20,7 +22,8 @@ class STTConfig:
     silence_thresh_dbfs: int = -40
     keep_silence_ms: int = 500
     chunk_size_safety_margin: float = 0.9
-    max_parallel_files: int = 2
+    max_parallel_files: int = 0
+    chunk_workers: int = 0
     backend: str = "faster-whisper"
     model: str = "small"
     emit_chunk_debug: bool = False
@@ -76,7 +79,8 @@ def load_config(
         "silence_thresh_dbfs": int(raw.get("silence_thresh_dbfs", -40)),
         "keep_silence_ms": int(raw.get("keep_silence_ms", 500)),
         "chunk_size_safety_margin": float(raw.get("chunk_size_safety_margin", 0.9)),
-        "max_parallel_files": int(raw.get("max_parallel_files", 2)),
+        "max_parallel_files": parse_parallel_setting(raw.get("max_parallel_files", 0)),
+        "chunk_workers": parse_parallel_setting(raw.get("chunk_workers", 0)),
         "backend": str(raw.get("backend", "faster-whisper")),
         "model": str(raw.get("model", "small")),
         "emit_chunk_debug": _as_bool(raw.get("emit_chunk_debug", False)),
@@ -98,9 +102,10 @@ def load_config(
                 "min_silence_len_ms",
                 "silence_thresh_dbfs",
                 "keep_silence_ms",
-                "max_parallel_files",
             }:
                 values[key] = int(value)
+            elif key in {"max_parallel_files", "chunk_workers"}:
+                values[key] = parse_parallel_setting(value)
             elif key == "chunk_size_safety_margin":
                 values[key] = float(value)
             elif key in {"emit_chunk_debug", "fail_on_any_error"}:
@@ -136,8 +141,10 @@ def _validate_config(config: STTConfig) -> None:
         raise ValueError("sample_rate_hz must be greater than zero")
     if config.audio_channels <= 0:
         raise ValueError("audio_channels must be greater than zero")
-    if config.max_parallel_files <= 0:
-        raise ValueError("max_parallel_files must be greater than zero")
+    if config.max_parallel_files < 0:
+        raise ValueError("max_parallel_files must be zero or greater")
+    if config.chunk_workers < 0:
+        raise ValueError("chunk_workers must be zero or greater")
     if config.chunk_bitrate_kbps <= 0:
         raise ValueError("chunk_bitrate_kbps must be greater than zero")
     if config.min_silence_len_ms <= 0:

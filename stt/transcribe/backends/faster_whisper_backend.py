@@ -9,7 +9,7 @@ from ...models import TranscriptionResult
 class FasterWhisperBackend:
     name = "faster-whisper"
 
-    def __init__(self, config: STTConfig) -> None:
+    def __init__(self, config: STTConfig, num_workers: int | None = None) -> None:
         self._config = config
         try:
             from faster_whisper import WhisperModel
@@ -22,6 +22,7 @@ class FasterWhisperBackend:
             config.model,
             device="cpu",
             compute_type="int8",
+            num_workers=max(int(num_workers or 1), 1),
         )
 
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
@@ -47,4 +48,3 @@ class FasterWhisperBackend:
             language_probability=getattr(info, "language_probability", None),
             segments=collected_segments,
         )
-

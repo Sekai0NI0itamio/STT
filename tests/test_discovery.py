@@ -6,7 +6,7 @@ import textwrap
 import unittest
 
 from stt.config import load_config
-from stt.discovery import discover_inputs
+from stt.discovery import build_discovery_manifest, discover_inputs
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -57,6 +57,10 @@ class DiscoveryTests(unittest.TestCase):
                     "incoming/too-big.mp3",
                 ],
             )
+
+            manifest = build_discovery_manifest(config, max_parallel=0)
+            self.assertEqual(manifest["count"], 3)
+            self.assertEqual(manifest["max_parallel"], 3)
 
 
 if __name__ == "__main__":

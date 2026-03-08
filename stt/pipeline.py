@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import traceback
 from typing import Any
@@ -7,11 +8,12 @@ import shutil
 
 from .backend_factory import build_backend
 from .chunking import build_chunk_plans, merge_chunk_texts
+from .concurrency import resolve_parallel_workers
 from .config import STTConfig
 from .discovery import build_slug
 from .ffmpeg_tools import FFmpegError, extract_chunk_mp3, normalize_audio, probe_duration_seconds
 from .logging_utils import configure_file_logger
-from .models import ChunkResult, PipelineStatus
+from .models import ChunkPlan, ChunkResult, PipelineStatus
 from .utils import utcnow_iso, write_json, write_text
 
 
@@ -81,93 +83,51 @@ def process_one_input(
 
         chunk_plan, chunking_metadata = build_chunk_plans(normalized_path, config)
         metadata["planned_chunks"] = [chunk.to_dict() for chunk in chunk_plan]
-        metadata["chunking"] = chunking_metadata
-        backend = build_backend(config)
+        resolved_chunk_workers = resolve_parallel_workers(config.chunk_workers, len(chunk_plan))
+        metadata["chunking"] = {
+            **chunking_metadata,
+            "configured_chunk_workers": config.chunk_workers,
+            "resolved_chunk_workers": resolved_chunk_workers,
+        }
+        backend = build_backend(config, num_workers=resolved_chunk_workers)
         logger.info("Loaded backend=%s model=%s", config.backend, config.model)
         logger.info(
-            "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s",
+            "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s and chunk_workers=%d",
             len(chunk_plan),
             chunking_metadata["max_chunk_duration_ms"],
+            resolved_chunk_workers,
         )
 
-        for chunk in chunk_plan:
-            chunk_audio_path = work_root / "chunks" / f"{chunk.chunk_id}.mp3"
-            retained_chunk_audio_path = None
-            logger.info(
-                "Processing chunk %s start=%.3fs duration=%.3fs",
-                chunk.chunk_id,
-                chunk.start_seconds,
-                chunk.duration_seconds,
-            )
-            try:
-                extract_chunk_mp3(
-                    input_path=normalized_path,
-                    output_path=chunk_audio_path,
-                    start_seconds=chunk.start_seconds,
-                    duration_seconds=chunk.duration_seconds,
-                    sample_rate_hz=config.sample_rate_hz,
-                    audio_channels=config.audio_channels,
-                    bitrate_kbps=config.chunk_bitrate_kbps,
-                )
-                audio_size_bytes = chunk_audio_path.stat().st_size
-                if audio_size_bytes > config.max_input_bytes:
-                    raise PipelineStageError(
-                        "chunking",
-                        (
-                            f"{chunk.chunk_id} exceeded max_input_mb={config.max_input_mb} "
-                            f"after export: {audio_size_bytes} bytes"
-                        ),
+        with ThreadPoolExecutor(max_workers=resolved_chunk_workers, thread_name_prefix="stt-chunk") as executor:
+            futures = {
+                executor.submit(
+                    _process_chunk,
+                    chunk=chunk,
+                    normalized_path=normalized_path,
+                    file_root=file_root,
+                    work_root=work_root,
+                    config=config,
+                    backend=backend,
+                    logger=logger,
+                ): chunk
+                for chunk in chunk_plan
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result.status == "success":
+                    logger.info(
+                        "Completed chunk %s audio_size_bytes=%d",
+                        result.chunk_id,
+                        result.audio_size_bytes,
                     )
-                if config.emit_chunk_debug:
-                    retained_chunk_audio_path = f"chunks/{chunk.chunk_id}.mp3"
-                    shutil.copy2(chunk_audio_path, file_root / retained_chunk_audio_path)
-                transcription = backend.transcribe(chunk_audio_path)
-                text = transcription.text.strip()
-                transcript_debug_path = None
-                debug_path = None
-                if config.emit_chunk_debug:
-                    transcript_debug_path = f"chunks/{chunk.chunk_id}.txt"
-                    debug_path = f"chunks/{chunk.chunk_id}.json"
-                    write_text(file_root / transcript_debug_path, text)
-                    write_json(file_root / debug_path, transcription.to_dict())
-                chunk_results.append(
-                    ChunkResult(
-                        chunk_id=chunk.chunk_id,
-                        index=chunk.index,
-                        start_seconds=chunk.start_seconds,
-                        duration_seconds=chunk.duration_seconds,
-                        status="success",
-                        audio_path=retained_chunk_audio_path,
-                        audio_size_bytes=audio_size_bytes,
-                        transcript_text=text,
-                        transcript_path=transcript_debug_path,
-                        language=transcription.language,
-                        language_probability=transcription.language_probability,
-                        segment_count=len(transcription.segments),
-                        debug_path=debug_path,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Chunk %s failed", chunk.chunk_id)
-                if failure_stage is None:
-                    failure_stage = "chunking" if isinstance(exc, FFmpegError) else "transcription"
-                    failure_message = f"{chunk.chunk_id}: {exc}"
-                chunk_results.append(
-                    ChunkResult(
-                        chunk_id=chunk.chunk_id,
-                        index=chunk.index,
-                        start_seconds=chunk.start_seconds,
-                        duration_seconds=chunk.duration_seconds,
-                        status="failed",
-                        audio_path=retained_chunk_audio_path,
-                        audio_size_bytes=chunk_audio_path.stat().st_size if chunk_audio_path.exists() else 0,
-                        error_message=str(exc),
-                    )
-                )
-                continue
-            finally:
-                if chunk_audio_path.exists():
-                    chunk_audio_path.unlink()
+                else:
+                    logger.error("Chunk %s failed: %s", result.chunk_id, result.error_message)
+                    if failure_stage is None:
+                        failure_stage = result.error_stage or "transcription"
+                        failure_message = f"{result.chunk_id}: {result.error_message}"
+                chunk_results.append(result)
+
+        chunk_results.sort(key=lambda result: result.index)
 
         metadata["chunk_results"] = [_serialize_chunk_result(result, config.emit_chunk_debug) for result in chunk_results]
         write_json(file_root / "chunks" / "chunk-manifest.json", metadata["chunk_results"])
@@ -237,6 +197,96 @@ def _validate_input(config: STTConfig, input_path: Path) -> None:
         raise PipelineStageError("input_validation", f"Input file does not exist: {input_path}")
     if input_path.suffix.lower() != ".mp3":
         raise PipelineStageError("input_validation", f"Only .mp3 files are supported: {input_path}")
+
+
+def _process_chunk(
+    *,
+    chunk: ChunkPlan,
+    normalized_path: Path,
+    file_root: Path,
+    work_root: Path,
+    config: STTConfig,
+    backend: Any,
+    logger: Any,
+) -> ChunkResult:
+    chunk_audio_path = work_root / "chunks" / f"{chunk.chunk_id}.mp3"
+    retained_chunk_audio_path = None
+    logger.info(
+        "Submitting chunk %s start=%.3fs duration=%.3fs",
+        chunk.chunk_id,
+        chunk.start_seconds,
+        chunk.duration_seconds,
+    )
+    try:
+        extract_chunk_mp3(
+            input_path=normalized_path,
+            output_path=chunk_audio_path,
+            start_seconds=chunk.start_seconds,
+            duration_seconds=chunk.duration_seconds,
+            sample_rate_hz=config.sample_rate_hz,
+            audio_channels=config.audio_channels,
+            bitrate_kbps=config.chunk_bitrate_kbps,
+        )
+        audio_size_bytes = chunk_audio_path.stat().st_size
+        if audio_size_bytes > config.max_input_bytes:
+            raise PipelineStageError(
+                "chunking",
+                (
+                    f"{chunk.chunk_id} exceeded max_input_mb={config.max_input_mb} "
+                    f"after export: {audio_size_bytes} bytes"
+                ),
+            )
+        if config.emit_chunk_debug:
+            retained_chunk_audio_path = f"chunks/{chunk.chunk_id}.mp3"
+            shutil.copy2(chunk_audio_path, file_root / retained_chunk_audio_path)
+        transcription = backend.transcribe(chunk_audio_path)
+        text = transcription.text.strip()
+        transcript_debug_path = None
+        debug_path = None
+        if config.emit_chunk_debug:
+            transcript_debug_path = f"chunks/{chunk.chunk_id}.txt"
+            debug_path = f"chunks/{chunk.chunk_id}.json"
+            write_text(file_root / transcript_debug_path, text)
+            write_json(file_root / debug_path, transcription.to_dict())
+        return ChunkResult(
+            chunk_id=chunk.chunk_id,
+            index=chunk.index,
+            start_seconds=chunk.start_seconds,
+            duration_seconds=chunk.duration_seconds,
+            status="success",
+            audio_path=retained_chunk_audio_path,
+            audio_size_bytes=audio_size_bytes,
+            transcript_text=text,
+            transcript_path=transcript_debug_path,
+            language=transcription.language,
+            language_probability=transcription.language_probability,
+            segment_count=len(transcription.segments),
+            debug_path=debug_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Chunk %s failed inside worker", chunk.chunk_id)
+        return ChunkResult(
+            chunk_id=chunk.chunk_id,
+            index=chunk.index,
+            start_seconds=chunk.start_seconds,
+            duration_seconds=chunk.duration_seconds,
+            status="failed",
+            audio_path=retained_chunk_audio_path,
+            audio_size_bytes=chunk_audio_path.stat().st_size if chunk_audio_path.exists() else 0,
+            error_stage=_classify_chunk_error(exc),
+            error_message=str(exc),
+        )
+    finally:
+        if chunk_audio_path.exists():
+            chunk_audio_path.unlink()
+
+
+def _classify_chunk_error(exc: Exception) -> str:
+    if isinstance(exc, PipelineStageError):
+        return exc.stage
+    if isinstance(exc, FFmpegError):
+        return "chunking"
+    return "transcription"
 
 
 def _serialize_chunk_result(result: ChunkResult, include_text: bool) -> dict[str, Any]:

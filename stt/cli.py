@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 
+from .concurrency import parse_parallel_setting
 from .config import load_config
 from .discovery import build_discovery_manifest, write_discovery_json
 from .pipeline import process_one_input
@@ -25,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser = subparsers.add_parser("discover", help="Discover committed MP3 inputs")
     _add_common_config_args(discover_parser)
     discover_parser.add_argument("--file-glob", default="")
-    discover_parser.add_argument("--max-parallel", type=int)
+    discover_parser.add_argument("--max-parallel", type=parse_parallel_setting)
     discover_parser.add_argument("--manifest-out")
     discover_parser.add_argument("--github-output-file")
     discover_parser.set_defaults(func=_run_discover)
@@ -48,11 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_common_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default="stt.toml")
     parser.add_argument("--chunk-seconds", type=int)
+    parser.add_argument("--chunk-workers", type=parse_parallel_setting)
     parser.add_argument("--model")
     parser.add_argument("--emit-chunk-debug")
     parser.add_argument("--fail-on-any-error")
     parser.add_argument("--max-input-mb", type=int)
-    parser.add_argument("--max-parallel-files", type=int)
+    parser.add_argument("--max-parallel-files", type=parse_parallel_setting)
 
 
 def _run_discover(args: argparse.Namespace) -> int:
@@ -108,6 +110,7 @@ def _load_config_from_args(args: argparse.Namespace):
         "fail_on_any_error": getattr(args, "fail_on_any_error", None),
         "max_input_mb": getattr(args, "max_input_mb", None),
         "max_parallel_files": getattr(args, "max_parallel_files", None),
+        "chunk_workers": getattr(args, "chunk_workers", None),
     }
     return load_config(args.config, overrides=overrides)
 

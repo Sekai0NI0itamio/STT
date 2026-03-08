@@ -30,12 +30,13 @@ The `STT Transcribe` workflow has three jobs.
 Each input file gets its own matrix job.
 
 - `strategy.fail-fast: false` keeps one file failure from cancelling the other files.
-- `strategy.max-parallel` controls how many files run concurrently.
+- `strategy.max-parallel` controls how many files run concurrently. The default workflow setting is `unlimited`, which means all discovered files fan out at once.
 - `ffmpeg` normalizes the source to mono 16 kHz WAV.
 - `ffprobe` measures duration.
 - `pydub` inspects the normalized audio and finds likely speech regions separated by silence.
 - STT groups those regions into chunk windows that stay under both the configured duration cap and the configured chunk-size ceiling.
 - Each chunk is exported as a normalized sub-`.mp3` file and transcribed with `faster-whisper`.
+- Chunk extraction and chunk transcription run concurrently through a worker pool inside the file job. The default worker mode is `unlimited`, which means all planned chunks for that file are scheduled at once.
 - Chunk failures are recorded and later chunks are still attempted.
 - If any chunk fails, the file is marked failed and no final per-file transcript is emitted.
 - The job always uploads its artifact folder before replaying the final exit status.
@@ -82,7 +83,8 @@ min_silence_len_ms = 500
 silence_thresh_dbfs = -40
 keep_silence_ms = 500
 chunk_size_safety_margin = 0.9
-max_parallel_files = 2
+max_parallel_files = 0
+chunk_workers = 0
 backend = "faster-whisper"
 model = "small"
 emit_chunk_debug = false
@@ -94,6 +96,7 @@ Workflow-dispatch inputs can override the most useful run-time knobs:
 - `file_glob`
 - `max_parallel`
 - `chunk_seconds`
+- `chunk_workers`
 - `model`
 - `emit_chunk_debug`
 - `fail_on_any_error`
@@ -106,6 +109,8 @@ Advanced chunking controls stay in `stt.toml`:
 - `silence_thresh_dbfs`: silence threshold for `pydub`
 - `keep_silence_ms`: silence padding retained around chunk edges
 - `chunk_size_safety_margin`: extra headroom below the configured chunk-size ceiling
+- `max_parallel_files`: file-level matrix concurrency, where `0` means unlimited
+- `chunk_workers`: per-file chunk worker concurrency, where `0` means unlimited
 
 ## Output contract
 
@@ -195,6 +200,7 @@ The retry model is GitHub-native rather than stateful local resumption.
 - Re-run the whole workflow when you want a fresh pass across all committed inputs.
 - Re-run failed jobs from the Actions UI when only a subset of files need another attempt.
 - Because work is split into one matrix job per file, file-level retries are naturally isolated.
+- Chunk work inside a file is parallelized, but retries still happen at the file-job level rather than resuming individual chunk workers.
 - The artifact layout keeps enough detail to compare a failed attempt to a later rerun.
 
 ## Secrets and security
@@ -230,8 +236,9 @@ This repo keeps a backend seam so future backends can replace the transcribe ste
 4. Click `Run workflow`.
 5. Optionally narrow to a subset with `file_glob`.
 6. Optionally tune `max_parallel`, `chunk_seconds`, `model`, or `emit_chunk_debug`.
-7. Wait for the matrix jobs and summary job to finish.
-8. Download `stt-run-results`.
+7. Leave `max_parallel` and `chunk_workers` on `unlimited` if you want STT to use all discovered files and all planned chunks concurrently on the GitHub runner.
+8. Wait for the matrix jobs and summary job to finish.
+9. Download `stt-run-results`.
 
 ## Troubleshooting
 
@@ -253,7 +260,7 @@ This repo keeps a backend seam so future backends can replace the transcribe ste
 
 - Inspect `chunks/chunk-manifest.json`.
 - If `emit_chunk_debug=true`, inspect the chunk-level `.mp3`, `.json`, and `.txt` files.
-- Re-run the failed job from GitHub Actions after adjusting the model or chunk size if needed.
+- Re-run the failed job from GitHub Actions after adjusting the model, `chunk_seconds`, or `chunk_workers` if needed.
 
 ### The run is red even though some transcripts exist
 
