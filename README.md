@@ -1,6 +1,6 @@
 # STT
 
-STT, short for Speed To Text, is a GitHub-native transcription automation project. Users commit small `.mp3` files into [`incoming/`](incoming/), run a manual GitHub Actions workflow, and download transcripts, logs, metadata, and summaries from workflow artifacts.
+STT, short for Speech To Text, is a GitHub-native transcription automation project. Users commit small `.mp3` files into [`incoming/`](incoming/), run a manual GitHub Actions workflow, and download transcripts, logs, metadata, and summaries from workflow artifacts.
 
 The default v1 backend runs `faster-whisper` on GitHub-hosted Ubuntu runners with `ffmpeg` handling normalization and chunk extraction. The system is designed to keep going across per-file failures, preserve diagnostics, and make future backend swaps straightforward.
 
