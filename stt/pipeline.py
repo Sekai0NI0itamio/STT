@@ -3,12 +3,13 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 import traceback
+from threading import BoundedSemaphore
 from typing import Any
 import shutil
 
 from .backend_factory import build_backend
 from .chunking import build_chunk_plans, merge_chunk_texts
-from .concurrency import resolve_parallel_workers
+from .concurrency import resolve_parallel_workers, resolve_transcription_workers
 from .config import STTConfig
 from .discovery import build_slug
 from .ffmpeg_tools import FFmpegError, extract_chunk_mp3, normalize_audio, probe_duration_seconds
@@ -84,18 +85,25 @@ def process_one_input(
         chunk_plan, chunking_metadata = build_chunk_plans(normalized_path, config)
         metadata["planned_chunks"] = [chunk.to_dict() for chunk in chunk_plan]
         resolved_chunk_workers = resolve_parallel_workers(config.chunk_workers, len(chunk_plan))
+        resolved_transcription_workers = resolve_transcription_workers(config.model, len(chunk_plan))
         metadata["chunking"] = {
             **chunking_metadata,
             "configured_chunk_workers": config.chunk_workers,
             "resolved_chunk_workers": resolved_chunk_workers,
+            "resolved_transcription_workers": resolved_transcription_workers,
         }
         logger.info(
-            "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s and chunk_workers=%d",
+            (
+                "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s, "
+                "chunk_workers=%d, transcription_workers=%d"
+            ),
             len(chunk_plan),
             chunking_metadata["max_chunk_duration_ms"],
             resolved_chunk_workers,
+            resolved_transcription_workers,
         )
 
+        transcription_gate = BoundedSemaphore(value=resolved_transcription_workers)
         with ThreadPoolExecutor(
             max_workers=resolved_chunk_workers + 1,
             thread_name_prefix="stt-chunk",
@@ -103,7 +111,7 @@ def process_one_input(
             backend_future = executor.submit(
                 _initialize_backend,
                 config,
-                resolved_chunk_workers,
+                resolved_transcription_workers,
                 logger,
             )
             futures = {
@@ -115,6 +123,7 @@ def process_one_input(
                     work_root=work_root,
                     config=config,
                     backend_future=backend_future,
+                    transcription_gate=transcription_gate,
                     logger=logger,
                 ): chunk
                 for chunk in chunk_plan
@@ -214,6 +223,7 @@ def _process_chunk(
     work_root: Path,
     config: STTConfig,
     backend_future: Future[Any],
+    transcription_gate: BoundedSemaphore,
     logger: Any,
 ) -> ChunkResult:
     chunk_audio_path = work_root / "chunks" / f"{chunk.chunk_id}.mp3"
@@ -247,7 +257,11 @@ def _process_chunk(
             retained_chunk_audio_path = f"chunks/{chunk.chunk_id}.mp3"
             shutil.copy2(chunk_audio_path, file_root / retained_chunk_audio_path)
         backend = backend_future.result()
-        transcription = backend.transcribe(chunk_audio_path)
+        transcription_gate.acquire()
+        try:
+            transcription = backend.transcribe(chunk_audio_path)
+        finally:
+            transcription_gate.release()
         text = transcription.text.strip()
         transcript_debug_path = None
         debug_path = None
@@ -297,13 +311,17 @@ def _classify_chunk_error(exc: Exception) -> str:
     return "transcription"
 
 
-def _initialize_backend(config: STTConfig, resolved_chunk_workers: int, logger: Any) -> Any:
+def _initialize_backend(config: STTConfig, resolved_transcription_workers: int, logger: Any) -> Any:
     logger.info(
-        "Starting backend initialization concurrently with chunk extraction: backend=%s model=%s",
+        (
+            "Starting backend initialization concurrently with chunk extraction: "
+            "backend=%s model=%s transcription_workers=%d"
+        ),
         config.backend,
         config.model,
+        resolved_transcription_workers,
     )
-    backend = build_backend(config, num_workers=resolved_chunk_workers)
+    backend = build_backend(config, num_workers=resolved_transcription_workers)
     logger.info("Loaded backend=%s model=%s", config.backend, config.model)
     return backend
 

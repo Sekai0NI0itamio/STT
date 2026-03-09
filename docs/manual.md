@@ -40,6 +40,7 @@ Each input file gets its own matrix job.
 - Each chunk is exported as a normalized sub-`.mp3` file and transcribed with `faster-whisper`.
 - Chunk extraction and chunk transcription run concurrently through a worker pool inside the file job. The default worker mode is `unlimited`, which means all planned chunks for that file are scheduled at once.
 - Backend/model initialization starts in parallel with chunk extraction so transcription workers do not wait for model load after the chunks are ready.
+- STT keeps chunk extraction aggressive, but it automatically caps CPU-heavy transcription concurrency for `medium` and larger `faster-whisper` models so the runner does not slow down from self-inflicted CPU oversubscription.
 - Chunk failures are recorded and later chunks are still attempted.
 - If any chunk fails, the file is marked failed and no final per-file transcript is emitted.
 - The job always uploads its artifact folder before replaying the final exit status.
@@ -240,6 +241,7 @@ Tradeoffs:
 
 - it is slower than an external managed API
 - model size is constrained by runner CPU and memory
+- `medium` is materially slower than `small` on GitHub-hosted CPU runners, even with the same chunk plan
 - parallel matrix jobs may each fetch the model cache on a cold run
 
 This repo keeps a backend seam so future backends can replace the transcribe step without rewriting discovery, chunking, artifacts, or summary generation.
@@ -277,6 +279,12 @@ This repo keeps a backend seam so future backends can replace the transcribe ste
 - Inspect `chunks/chunk-manifest.json`.
 - If `emit_chunk_debug=true`, inspect the chunk-level `.mp3`, `.json`, and `.txt` files.
 - Re-run the failed job from GitHub Actions after adjusting the model, `chunk_seconds`, or `chunk_workers` if needed.
+
+### The run succeeded but it became much slower
+
+- Compare the selected `model` value first. `medium` on CPU is expected to be much slower than `small`.
+- Check `logs/process.log` for the resolved `transcription_workers` value. STT now limits CPU-heavy models to a smaller number of simultaneous transcribes so the runner does not thrash itself.
+- If raw speed matters more than accuracy, use `model=small`.
 
 ### The run is red even though some transcripts exist
 

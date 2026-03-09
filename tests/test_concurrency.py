@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import unittest
 
-from stt.concurrency import parse_parallel_setting, resolve_parallel_workers
+from stt.concurrency import resolve_transcription_workers
 
 
 class ConcurrencyTests(unittest.TestCase):
-    def test_parse_parallel_setting_supports_unlimited(self) -> None:
-        self.assertEqual(parse_parallel_setting("unlimited"), 0)
-        self.assertEqual(parse_parallel_setting("auto"), 0)
-        self.assertEqual(parse_parallel_setting(4), 4)
+    def test_small_model_keeps_unlimited_chunk_parallelism(self) -> None:
+        self.assertEqual(resolve_transcription_workers("small", task_count=21, cpu_count=4), 21)
 
-    def test_resolve_parallel_workers_uses_all_tasks_when_unlimited(self) -> None:
-        self.assertEqual(resolve_parallel_workers(0, 5), 5)
-        self.assertEqual(resolve_parallel_workers(2, 5), 2)
-        self.assertEqual(resolve_parallel_workers(10, 3), 3)
-        self.assertEqual(resolve_parallel_workers(0, 0), 1)
+    def test_medium_model_caps_transcription_workers_to_cpu_count(self) -> None:
+        self.assertEqual(resolve_transcription_workers("medium", task_count=21, cpu_count=4), 4)
+
+    def test_large_model_uses_more_conservative_cap(self) -> None:
+        self.assertEqual(resolve_transcription_workers("large-v3", task_count=21, cpu_count=4), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

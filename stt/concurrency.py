@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 
 UNLIMITED_SENTINELS = {"0", "all", "auto", "max", "unlimited"}
 
@@ -28,3 +30,19 @@ def resolve_parallel_workers(configured: int, task_count: int) -> int:
         return task_count
     return min(configured, task_count)
 
+
+def resolve_transcription_workers(model: str, task_count: int, cpu_count: int | None = None) -> int:
+    if task_count <= 0:
+        return 1
+
+    available_cpus = max(int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)), 1)
+    normalized_model = model.strip().lower()
+
+    if normalized_model.startswith("large"):
+        recommended = max(1, available_cpus // 2)
+    elif normalized_model == "medium":
+        recommended = available_cpus
+    else:
+        recommended = task_count
+
+    return min(task_count, max(recommended, 1))
