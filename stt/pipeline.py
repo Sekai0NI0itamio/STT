@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 import traceback
 from typing import Any
@@ -89,8 +89,6 @@ def process_one_input(
             "configured_chunk_workers": config.chunk_workers,
             "resolved_chunk_workers": resolved_chunk_workers,
         }
-        backend = build_backend(config, num_workers=resolved_chunk_workers)
-        logger.info("Loaded backend=%s model=%s", config.backend, config.model)
         logger.info(
             "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s and chunk_workers=%d",
             len(chunk_plan),
@@ -98,7 +96,16 @@ def process_one_input(
             resolved_chunk_workers,
         )
 
-        with ThreadPoolExecutor(max_workers=resolved_chunk_workers, thread_name_prefix="stt-chunk") as executor:
+        with ThreadPoolExecutor(
+            max_workers=resolved_chunk_workers + 1,
+            thread_name_prefix="stt-chunk",
+        ) as executor:
+            backend_future = executor.submit(
+                _initialize_backend,
+                config,
+                resolved_chunk_workers,
+                logger,
+            )
             futures = {
                 executor.submit(
                     _process_chunk,
@@ -107,7 +114,7 @@ def process_one_input(
                     file_root=file_root,
                     work_root=work_root,
                     config=config,
-                    backend=backend,
+                    backend_future=backend_future,
                     logger=logger,
                 ): chunk
                 for chunk in chunk_plan
@@ -206,7 +213,7 @@ def _process_chunk(
     file_root: Path,
     work_root: Path,
     config: STTConfig,
-    backend: Any,
+    backend_future: Future[Any],
     logger: Any,
 ) -> ChunkResult:
     chunk_audio_path = work_root / "chunks" / f"{chunk.chunk_id}.mp3"
@@ -239,6 +246,7 @@ def _process_chunk(
         if config.emit_chunk_debug:
             retained_chunk_audio_path = f"chunks/{chunk.chunk_id}.mp3"
             shutil.copy2(chunk_audio_path, file_root / retained_chunk_audio_path)
+        backend = backend_future.result()
         transcription = backend.transcribe(chunk_audio_path)
         text = transcription.text.strip()
         transcript_debug_path = None
@@ -287,6 +295,17 @@ def _classify_chunk_error(exc: Exception) -> str:
     if isinstance(exc, FFmpegError):
         return "chunking"
     return "transcription"
+
+
+def _initialize_backend(config: STTConfig, resolved_chunk_workers: int, logger: Any) -> Any:
+    logger.info(
+        "Starting backend initialization concurrently with chunk extraction: backend=%s model=%s",
+        config.backend,
+        config.model,
+    )
+    backend = build_backend(config, num_workers=resolved_chunk_workers)
+    logger.info("Loaded backend=%s model=%s", config.backend, config.model)
+    return backend
 
 
 def _serialize_chunk_result(result: ChunkResult, include_text: bool) -> dict[str, Any]:

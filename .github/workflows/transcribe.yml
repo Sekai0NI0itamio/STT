@@ -56,6 +56,15 @@ on:
         required: false
         default: true
         type: boolean
+      dependency_mode:
+        description: Dependency install strategy for the cached virtualenv
+        required: false
+        default: repair-missing
+        type: choice
+        options:
+          - repair-missing
+          - cached
+          - reinstall
 
 permissions:
   contents: read
@@ -83,15 +92,20 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install STT package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install .
+      - name: Restore cached base virtualenv
+        if: ${{ inputs.dependency_mode != 'reinstall' }}
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-py311-base-${{ hashFiles('pyproject.toml') }}
+
+      - name: Prepare Python environment
+        run: bash .github/scripts/ensure_python_env.sh base "${{ inputs.dependency_mode }}"
 
       - name: Discover committed inputs
         id: discover
         run: |
-          python -m stt.cli discover \
+          .venv/bin/python -m stt.cli discover \
             --config stt.toml \
             --file-glob "${{ inputs.file_glob }}" \
             --max-parallel "${{ inputs.max_parallel }}" \
@@ -147,10 +161,12 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install STT runtime dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install '.[runtime]'
+      - name: Restore cached runtime virtualenv
+        if: ${{ inputs.dependency_mode != 'reinstall' }}
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-py311-runtime-${{ hashFiles('pyproject.toml') }}
 
       - name: Restore model cache
         uses: actions/cache@v4
@@ -160,11 +176,30 @@ jobs:
             ~/.cache/ctranslate2
           key: ${{ runner.os }}-faster-whisper-${{ inputs.model }}
 
+      - name: Prepare runtime environment
+        run: |
+          set -euo pipefail
+          ffmpeg_pid=""
+          if command -v ffmpeg >/dev/null 2>&1; then
+            echo "Using preinstalled ffmpeg"
+          else
+            (
+              sudo apt-get update
+              sudo apt-get install -y ffmpeg
+            ) &
+            ffmpeg_pid=$!
+          fi
+          bash .github/scripts/ensure_python_env.sh runtime "${{ inputs.dependency_mode }}"
+          if [ -n "${ffmpeg_pid:-}" ]; then
+            wait "$ffmpeg_pid"
+          fi
+          ffmpeg -version | head -n 1
+
       - name: Process input file
         id: process
         run: |
           set +e
-          python -m stt.cli process-one \
+          .venv/bin/python -m stt.cli process-one \
             --config stt.toml \
             --input-relpath "${{ matrix.relpath }}" \
             --job-output-dir outputs/job \
@@ -207,10 +242,15 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install STT package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install .
+      - name: Restore cached base virtualenv
+        if: ${{ inputs.dependency_mode != 'reinstall' }}
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-py311-base-${{ hashFiles('pyproject.toml') }}
+
+      - name: Prepare Python environment
+        run: bash .github/scripts/ensure_python_env.sh base "${{ inputs.dependency_mode }}"
 
       - name: Download per-file artifacts
         if: ${{ needs.discover.outputs.count != '0' }}
@@ -224,7 +264,7 @@ jobs:
         id: summarize
         run: |
           set +e
-          python -m stt.cli summarize \
+          .venv/bin/python -m stt.cli summarize \
             --config stt.toml \
             --results-root outputs/downloaded/per-file \
             --output-dir outputs/final \

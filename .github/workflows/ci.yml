@@ -24,17 +24,20 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install validation dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install '.[dev]'
+      - name: Restore cached dev virtualenv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-py311-dev-${{ hashFiles('pyproject.toml') }}
+
+      - name: Prepare validation environment
+        run: bash .github/scripts/ensure_python_env.sh dev repair-missing
 
       - name: Lint
-        run: python -m ruff check .
+        run: .venv/bin/python -m ruff check .
 
       - name: Compile Python modules
-        run: python -m compileall stt tests
+        run: .venv/bin/python -m compileall stt tests
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
+        run: .venv/bin/python -m unittest discover -s tests -v

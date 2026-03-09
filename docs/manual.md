@@ -31,12 +31,15 @@ Each input file gets its own matrix job.
 
 - `strategy.fail-fast: false` keeps one file failure from cancelling the other files.
 - `strategy.max-parallel` controls how many files run concurrently. The default workflow setting is `unlimited`, which means all discovered files fan out at once.
+- The workflow restores a cached `.venv` when available. `dependency_mode` controls whether STT reuses that cache as-is, repairs missing packages, or reinstalls from scratch.
 - `ffmpeg` normalizes the source to mono 16 kHz WAV.
+- If `ffmpeg` is missing on the runner, STT installs it while the Python runtime environment is being prepared so the setup time overlaps instead of staying fully serial.
 - `ffprobe` measures duration.
 - `pydub` inspects the normalized audio and finds likely speech regions separated by silence.
 - STT groups those regions into short chunk windows, aiming for about 45 seconds, keeping normal clips in the 30 to 60 second range, and staying under the configured chunk-size ceiling.
 - Each chunk is exported as a normalized sub-`.mp3` file and transcribed with `faster-whisper`.
 - Chunk extraction and chunk transcription run concurrently through a worker pool inside the file job. The default worker mode is `unlimited`, which means all planned chunks for that file are scheduled at once.
+- Backend/model initialization starts in parallel with chunk extraction so transcription workers do not wait for model load after the chunks are ready.
 - Chunk failures are recorded and later chunks are still attempted.
 - If any chunk fails, the file is marked failed and no final per-file transcript is emitted.
 - The job always uploads its artifact folder before replaying the final exit status.
@@ -99,6 +102,7 @@ Workflow-dispatch inputs can override the most useful run-time knobs:
 - `max_parallel`
 - `chunk_seconds`
 - `chunk_workers`
+- `dependency_mode`
 - `model`
 - `emit_chunk_debug`
 - `fail_on_any_error`
@@ -116,6 +120,12 @@ Advanced chunking controls stay in `stt.toml`:
 - `chunk_size_safety_margin`: extra headroom below the configured chunk-size ceiling
 - `max_parallel_files`: file-level matrix concurrency, where `0` means unlimited
 - `chunk_workers`: per-file chunk worker concurrency, where `0` means unlimited
+
+`dependency_mode` workflow choices:
+
+- `repair-missing`: default; reuse the cached virtualenv and install only what is missing
+- `cached`: use the cached virtualenv if present, otherwise do a normal install
+- `reinstall`: rebuild the virtualenv from scratch for that run
 
 ## Output contract
 
@@ -215,6 +225,7 @@ The default backend does not require secrets because transcription runs on the G
 - No browser uploads are involved.
 - Inputs are whatever the repository contains at the selected commit.
 - If you add an API-based backend later, store credentials in GitHub Actions secrets and inject them only in the jobs that need them.
+- GitHub-hosted runners are ephemeral, so STT cannot permanently install dependencies once and keep them forever. The workflow speeds repeat runs by caching the virtualenv, pip downloads, and model files between runs.
 
 ## Why `faster-whisper` in v1
 

@@ -2,7 +2,7 @@
 
 STT, short for Speech To Text, is a GitHub-native transcription automation project. Users commit `.mp3` files into [`incoming/`](incoming/), run a manual GitHub Actions workflow, and download transcripts, logs, metadata, and summaries from workflow artifacts.
 
-The default v1 backend runs `faster-whisper` on GitHub-hosted Ubuntu runners with `ffmpeg` handling normalization and `pydub` guiding silence-aware chunk planning. Larger source files are split into short sub-`mp3` chunks, targeting roughly 30 to 60 seconds per clip, and those chunks are extracted and transcribed concurrently inside each file job. The system is designed to keep going across per-file failures, preserve diagnostics, and make future backend swaps straightforward.
+The default v1 backend runs `faster-whisper` on GitHub-hosted Ubuntu runners with `ffmpeg` handling normalization and `pydub` guiding silence-aware chunk planning. Larger source files are split into short sub-`mp3` chunks, targeting roughly 30 to 60 seconds per clip, and those chunks are extracted and transcribed concurrently inside each file job. The workflow now reuses cached Python environments and model files between runs when possible instead of reinstalling everything every time.
 
 ## Quick start
 
