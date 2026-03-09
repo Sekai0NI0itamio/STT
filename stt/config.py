@@ -13,6 +13,7 @@ class STTConfig:
     root_dir: Path
     incoming_dir: Path
     outputs_dir: Path
+    transcription_mode: str = "direct"
     max_input_mb: int = 25
     sample_rate_hz: int = 16000
     audio_channels: int = 1
@@ -72,6 +73,7 @@ def load_config(
         "root_dir": root_dir,
         "incoming_dir": Path(raw.get("incoming_dir", "incoming")),
         "outputs_dir": Path(raw.get("outputs_dir", "outputs")),
+        "transcription_mode": str(raw.get("transcription_mode", "direct")),
         "max_input_mb": int(raw.get("max_input_mb", 25)),
         "sample_rate_hz": int(raw.get("sample_rate_hz", 16000)),
         "audio_channels": int(raw.get("audio_channels", 1)),
@@ -167,6 +169,8 @@ def _validate_config(config: STTConfig) -> None:
         raise ValueError("keep_silence_ms must be zero or greater")
     if not 0 < config.chunk_size_safety_margin <= 1:
         raise ValueError("chunk_size_safety_margin must be between 0 and 1")
+    if config.transcription_mode not in {"direct", "chunked"}:
+        raise ValueError("transcription_mode must be 'direct' or 'chunked'")
     if not config.backend:
         raise ValueError("backend must be set")
     if not config.model:

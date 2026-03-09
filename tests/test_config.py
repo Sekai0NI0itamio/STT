@@ -18,6 +18,7 @@ class ConfigTests(unittest.TestCase):
                     """
                     incoming_dir = "audio"
                     outputs_dir = "artifacts"
+                    transcription_mode = "chunked"
                     max_input_mb = 40
                     chunk_seconds = 60
                     chunk_target_seconds = 45
@@ -42,6 +43,7 @@ class ConfigTests(unittest.TestCase):
                 config_path,
                 overrides={
                     "chunk_seconds": 90,
+                    "transcription_mode": "direct",
                     "chunk_target_seconds": 40,
                     "chunk_min_seconds": 25,
                     "emit_chunk_debug": "true",
@@ -53,6 +55,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.root_dir, root.resolve())
             self.assertEqual(config.incoming_dir, Path("audio"))
             self.assertEqual(config.outputs_dir, Path("artifacts"))
+            self.assertEqual(config.transcription_mode, "direct")
             self.assertEqual(config.chunk_seconds, 90)
             self.assertEqual(config.chunk_target_seconds, 40)
             self.assertEqual(config.chunk_min_seconds, 25)
@@ -66,6 +69,15 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config.emit_chunk_debug)
             self.assertFalse(config.fail_on_any_error)
             self.assertEqual(config.max_input_bytes, 40 * 1024 * 1024)
+
+    def test_invalid_transcription_mode_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "stt.toml"
+            config_path.write_text('transcription_mode = "invalid"\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "transcription_mode"):
+                load_config(config_path)
 
 
 if __name__ == "__main__":

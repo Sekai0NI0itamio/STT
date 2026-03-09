@@ -91,6 +91,7 @@ class TranscriptionResult:
     text: str
     language: str | None = None
     language_probability: float | None = None
+    audio_duration_seconds: float | None = None
     segments: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

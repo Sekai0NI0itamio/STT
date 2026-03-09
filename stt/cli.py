@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_common_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default="stt.toml")
+    parser.add_argument("--transcription-mode", choices=["direct", "chunked"])
     parser.add_argument("--chunk-seconds", type=int)
     parser.add_argument("--chunk-target-seconds", type=int)
     parser.add_argument("--chunk-min-seconds", type=int)
@@ -106,6 +107,7 @@ def _run_summarize(args: argparse.Namespace) -> int:
 
 def _load_config_from_args(args: argparse.Namespace):
     overrides = {
+        "transcription_mode": getattr(args, "transcription_mode", None),
         "chunk_seconds": getattr(args, "chunk_seconds", None),
         "chunk_target_seconds": getattr(args, "chunk_target_seconds", None),
         "chunk_min_seconds": getattr(args, "chunk_min_seconds", None),

@@ -32,15 +32,14 @@ Each input file gets its own matrix job.
 - `strategy.fail-fast: false` keeps one file failure from cancelling the other files.
 - `strategy.max-parallel` controls how many files run concurrently. The default workflow setting is `unlimited`, which means all discovered files fan out at once.
 - The workflow restores a cached `.venv` when available. `dependency_mode` controls whether STT reuses that cache as-is, repairs missing packages, or reinstalls from scratch.
-- `ffmpeg` normalizes the source to mono 16 kHz WAV.
-- If `ffmpeg` is missing on the runner, STT installs it while the Python runtime environment is being prepared so the setup time overlaps instead of staying fully serial.
-- `ffprobe` measures duration.
-- `pydub` inspects the normalized audio and finds likely speech regions separated by silence.
-- STT groups those regions into short chunk windows, aiming for about 45 seconds, keeping normal clips in the 30 to 60 second range, and staying under the configured chunk-size ceiling.
-- Each chunk is exported as a normalized sub-`.mp3` file and transcribed with `faster-whisper`.
-- Chunk extraction and chunk transcription run concurrently through a worker pool inside the file job. The default worker mode is `unlimited`, which means all planned chunks for that file are scheduled at once.
-- Backend/model initialization starts in parallel with chunk extraction so transcription workers do not wait for model load after the chunks are ready.
-- STT keeps chunk extraction aggressive, but it automatically caps CPU-heavy transcription concurrency for `medium` and larger `faster-whisper` models so the runner does not slow down from self-inflicted CPU oversubscription.
+- In the default `direct` mode, STT sends the committed `.mp3` file straight to `faster-whisper` without first normalizing and exporting silence-cut chunk files.
+- In optional `chunked` mode, `ffmpeg` normalizes the source to mono 16 kHz WAV and `pydub` plans silence-aware chunks before transcription.
+- If `chunked` mode needs `ffmpeg` and it is missing on the runner, STT installs it while the Python runtime environment is being prepared so the setup time overlaps instead of staying fully serial.
+- `chunked` mode groups speech regions into short chunk windows, aiming for about 45 seconds, keeping normal clips in the 30 to 60 second range, and staying under the configured chunk-size ceiling.
+- In `chunked` mode, each chunk is exported as a normalized sub-`.mp3` file and transcribed with `faster-whisper`.
+- `chunked` mode runs chunk extraction and chunk transcription concurrently through a worker pool inside the file job. The default worker mode is `unlimited`, which means all planned chunks for that file are scheduled at once.
+- Backend/model initialization starts in parallel with chunk extraction for `chunked` mode, and direct full-file transcription emits periodic progress logs with approximate percentage and ETA.
+- STT automatically caps CPU-heavy transcription concurrency for `medium` and larger `faster-whisper` models so the runner does not slow down from self-inflicted CPU oversubscription.
 - Chunk failures are recorded and later chunks are still attempted.
 - If any chunk fails, the file is marked failed and no final per-file transcript is emitted.
 - The job always uploads its artifact folder before replaying the final exit status.
@@ -59,8 +58,8 @@ STT v1 expects committed `.mp3` files only.
 
 - Files must live under `incoming/` or one of its subdirectories.
 - Non-`.mp3` files are ignored.
-- Larger source `.mp3` files are allowed. STT splits them into smaller transcription chunks automatically.
-- The default chunk-size ceiling is `25 MB`, configured by `max_input_mb` in `stt.toml`.
+- Larger source `.mp3` files are allowed. In direct mode STT transcribes them as-is; in chunked mode STT splits them into smaller transcription chunks automatically.
+- The default chunk-size ceiling is `25 MB`, configured by `max_input_mb` in `stt.toml`, and it matters only when `transcription_mode = "chunked"`.
 
 Example input layout:
 
@@ -78,6 +77,7 @@ The root `stt.toml` file defines the stable configuration contract.
 ```toml
 incoming_dir = "incoming"
 outputs_dir = "outputs"
+transcription_mode = "direct"
 max_input_mb = 25
 sample_rate_hz = 16000
 audio_channels = 1
@@ -101,6 +101,7 @@ Workflow-dispatch inputs can override the most useful run-time knobs:
 
 - `file_glob`
 - `max_parallel`
+- `transcription_mode`
 - `chunk_seconds`
 - `chunk_workers`
 - `dependency_mode`
@@ -110,6 +111,7 @@ Workflow-dispatch inputs can override the most useful run-time knobs:
 
 Advanced chunking controls stay in `stt.toml`:
 
+- `transcription_mode`: `direct` for full-file transcription, or `chunked` for silence-aware sub-clip export
 - `chunk_seconds`: hard maximum length for each chunk
 - `chunk_target_seconds`: preferred cut target when silence boundaries allow it
 - `chunk_min_seconds`: soft minimum chunk length before STT tries to merge across the next silence
@@ -121,6 +123,8 @@ Advanced chunking controls stay in `stt.toml`:
 - `chunk_size_safety_margin`: extra headroom below the configured chunk-size ceiling
 - `max_parallel_files`: file-level matrix concurrency, where `0` means unlimited
 - `chunk_workers`: per-file chunk worker concurrency, where `0` means unlimited
+
+When `transcription_mode = "direct"`, the chunking-specific settings remain in the config but are not used for that run.
 
 `dependency_mode` workflow choices:
 
@@ -145,7 +149,7 @@ Each matrix job uploads a folder shaped like this:
     process.log
   chunks/
     chunk-manifest.json
-    chunk-0000.mp3             # only when emit_chunk_debug=true
+    chunk-0000.mp3             # only when emit_chunk_debug=true and chunked mode is used
     chunk-0000.txt             # only when emit_chunk_debug=true
     chunk-0000.json            # only when emit_chunk_debug=true
 ```
@@ -161,7 +165,7 @@ Each matrix job uploads a folder shaped like this:
 
 `metadata.json` adds the config snapshot, chunk plan, and artifact references.
 
-Temporary working WAV files are created during normalization and silence analysis, but they are deleted before artifact upload so the artifacts stay focused on logs, manifests, and transcript outputs. When `emit_chunk_debug=true`, the exported sub-`.mp3` chunk files are retained for inspection.
+In direct mode, `chunk-manifest.json` contains a single `full-input` entry for the full committed `.mp3` file. In chunked mode, temporary working WAV files are created during normalization and silence analysis, but they are deleted before artifact upload so the artifacts stay focused on logs, manifests, and transcript outputs. When `emit_chunk_debug=true`, the exported sub-`.mp3` chunk files are retained for inspection in chunked mode.
 
 ### Run-level artifact structure
 
@@ -242,6 +246,7 @@ Tradeoffs:
 - it is slower than an external managed API
 - model size is constrained by runner CPU and memory
 - `medium` is materially slower than `small` on GitHub-hosted CPU runners, even with the same chunk plan
+- direct full-file transcription can be faster than many small subclips on CPU, because chunk export and repeated model work add overhead
 - parallel matrix jobs may each fetch the model cache on a cold run
 
 This repo keeps a backend seam so future backends can replace the transcribe step without rewriting discovery, chunking, artifacts, or summary generation.
@@ -253,10 +258,11 @@ This repo keeps a backend seam so future backends can replace the transcribe ste
 3. Select `STT Transcribe`.
 4. Click `Run workflow`.
 5. Optionally narrow to a subset with `file_glob`.
-6. Optionally tune `max_parallel`, `chunk_seconds`, `model`, or `emit_chunk_debug`.
-7. Leave `max_parallel` and `chunk_workers` on `unlimited` if you want STT to use all discovered files and all planned chunks concurrently on the GitHub runner.
-8. Wait for the matrix jobs and summary job to finish.
-9. Download `stt-run-results`.
+6. Optionally tune `max_parallel`, `transcription_mode`, `chunk_seconds`, `model`, or `emit_chunk_debug`.
+7. Leave `transcription_mode` on `direct` if you want the model to process full committed `.mp3` files by default.
+8. If you switch to `chunked`, leave `max_parallel` and `chunk_workers` on `unlimited` if you want STT to use all discovered files and all planned chunks concurrently on the GitHub runner.
+9. Wait for the matrix jobs and summary job to finish.
+10. Download `stt-run-results`.
 
 ## Troubleshooting
 
@@ -283,6 +289,7 @@ This repo keeps a backend seam so future backends can replace the transcribe ste
 ### The run succeeded but it became much slower
 
 - Compare the selected `model` value first. `medium` on CPU is expected to be much slower than `small`.
+- Compare the selected `transcription_mode` next. For local `faster-whisper` on GitHub CPU runners, `direct` can beat `chunked` because it avoids normalization and subclip export overhead.
 - Check `logs/process.log` for the resolved `transcription_workers` value. STT now limits CPU-heavy models to a smaller number of simultaneous transcribes so the runner does not thrash itself.
 - If raw speed matters more than accuracy, use `model=small`.
 

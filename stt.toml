@@ -1,5 +1,6 @@
 incoming_dir = "incoming"
 outputs_dir = "outputs"
+transcription_mode = "direct"
 max_input_mb = 25
 sample_rate_hz = 16000
 audio_channels = 1

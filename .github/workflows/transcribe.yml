@@ -36,6 +36,14 @@ on:
         required: false
         default: "60"
         type: string
+      transcription_mode:
+        description: Use direct full-file transcription or silence-aware chunking
+        required: false
+        default: direct
+        type: choice
+        options:
+          - direct
+          - chunked
       model:
         description: faster-whisper model size (small is the fastest practical CPU default)
         required: false
@@ -175,20 +183,26 @@ jobs:
         run: |
           set -euo pipefail
           ffmpeg_pid=""
-          if command -v ffmpeg >/dev/null 2>&1; then
-            echo "Using preinstalled ffmpeg"
+          if [ "${{ inputs.transcription_mode }}" = "chunked" ]; then
+            if command -v ffmpeg >/dev/null 2>&1; then
+              echo "Using preinstalled ffmpeg"
+            else
+              (
+                sudo apt-get update
+                sudo apt-get install -y ffmpeg
+              ) &
+              ffmpeg_pid=$!
+            fi
           else
-            (
-              sudo apt-get update
-              sudo apt-get install -y ffmpeg
-            ) &
-            ffmpeg_pid=$!
+            echo "Skipping ffmpeg install for direct transcription mode"
           fi
           bash .github/scripts/ensure_python_env.sh runtime "${{ inputs.dependency_mode }}"
-          if [ -n "${ffmpeg_pid:-}" ]; then
-            wait "$ffmpeg_pid"
+          if [ "${{ inputs.transcription_mode }}" = "chunked" ]; then
+            if [ -n "${ffmpeg_pid:-}" ]; then
+              wait "$ffmpeg_pid"
+            fi
+            ffmpeg -version | head -n 1
           fi
-          ffmpeg -version | head -n 1
 
       - name: Process input file
         id: process
@@ -198,6 +212,7 @@ jobs:
             --config stt.toml \
             --input-relpath "${{ matrix.relpath }}" \
             --job-output-dir outputs/job \
+            --transcription-mode "${{ inputs.transcription_mode }}" \
             --chunk-seconds "${{ inputs.chunk_seconds }}" \
             --chunk-workers "${{ inputs.chunk_workers }}" \
             --model "${{ inputs.model }}" \

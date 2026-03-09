@@ -65,93 +65,61 @@ def process_one_input(
     try:
         _validate_input(config, input_path)
 
-        normalized_path = work_root / "normalized" / "audio.wav"
-        logger.info("Normalizing audio to %s", normalized_path)
-        normalize_audio(
-            input_path=input_path,
-            output_path=normalized_path,
-            sample_rate_hz=config.sample_rate_hz,
-            audio_channels=config.audio_channels,
-        )
-
-        audio_duration_seconds = probe_duration_seconds(normalized_path)
-        metadata["normalized_audio"] = {
-            "duration_seconds": audio_duration_seconds,
-            "sample_rate_hz": config.sample_rate_hz,
-            "audio_channels": config.audio_channels,
-            "retained_in_artifact": False,
-        }
-
-        chunk_plan, chunking_metadata = build_chunk_plans(normalized_path, config)
-        metadata["planned_chunks"] = [chunk.to_dict() for chunk in chunk_plan]
-        resolved_chunk_workers = resolve_parallel_workers(config.chunk_workers, len(chunk_plan))
-        resolved_transcription_workers = resolve_transcription_workers(config.model, len(chunk_plan))
-        metadata["chunking"] = {
-            **chunking_metadata,
-            "configured_chunk_workers": config.chunk_workers,
-            "resolved_chunk_workers": resolved_chunk_workers,
-            "resolved_transcription_workers": resolved_transcription_workers,
-        }
-        logger.info(
-            (
-                "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s, "
-                "chunk_workers=%d, transcription_workers=%d"
-            ),
-            len(chunk_plan),
-            chunking_metadata["max_chunk_duration_ms"],
-            resolved_chunk_workers,
-            resolved_transcription_workers,
-        )
-
-        transcription_gate = BoundedSemaphore(value=resolved_transcription_workers)
-        with ThreadPoolExecutor(
-            max_workers=resolved_chunk_workers + 1,
-            thread_name_prefix="stt-chunk",
-        ) as executor:
-            backend_future = executor.submit(
-                _initialize_backend,
-                config,
-                resolved_transcription_workers,
-                logger,
+        if config.transcription_mode == "direct":
+            logger.info(
+                "Using direct transcription mode for %s; skipping normalization and chunk export",
+                input_relpath,
             )
-            futures = {
-                executor.submit(
-                    _process_chunk,
-                    chunk=chunk,
-                    normalized_path=normalized_path,
-                    file_root=file_root,
-                    work_root=work_root,
-                    config=config,
-                    backend_future=backend_future,
-                    transcription_gate=transcription_gate,
-                    logger=logger,
-                ): chunk
-                for chunk in chunk_plan
+            chunk_plan, chunk_results, chunking_metadata = _process_direct_transcription(
+                config=config,
+                input_path=input_path,
+                file_root=file_root,
+                logger=logger,
+            )
+        else:
+            chunk_plan, chunk_results, chunking_metadata, audio_duration_seconds = _process_chunked_transcription(
+                config=config,
+                input_path=input_path,
+                file_root=file_root,
+                work_root=work_root,
+                logger=logger,
+            )
+            metadata["normalized_audio"] = {
+                "duration_seconds": audio_duration_seconds,
+                "sample_rate_hz": config.sample_rate_hz,
+                "audio_channels": config.audio_channels,
+                "retained_in_artifact": False,
             }
-            for future in as_completed(futures):
-                result = future.result()
-                if result.status == "success":
+
+        if audio_duration_seconds is None and chunk_results:
+            audio_duration_seconds = chunk_results[0].duration_seconds or None
+        metadata["transcription_mode"] = config.transcription_mode
+
+        metadata["planned_chunks"] = [chunk.to_dict() for chunk in chunk_plan]
+        metadata["chunking"] = chunking_metadata
+        metadata["chunk_results"] = [_serialize_chunk_result(result, config.emit_chunk_debug) for result in chunk_results]
+        write_json(file_root / "chunks" / "chunk-manifest.json", metadata["chunk_results"])
+
+        for result in chunk_results:
+            if result.status == "success":
+                if result.audio_size_bytes > 0:
                     logger.info(
                         "Completed chunk %s audio_size_bytes=%d",
                         result.chunk_id,
                         result.audio_size_bytes,
                     )
                 else:
-                    logger.error("Chunk %s failed: %s", result.chunk_id, result.error_message)
-                    if failure_stage is None:
-                        failure_stage = result.error_stage or "transcription"
-                        failure_message = f"{result.chunk_id}: {result.error_message}"
-                chunk_results.append(result)
-
-        chunk_results.sort(key=lambda result: result.index)
-
-        metadata["chunk_results"] = [_serialize_chunk_result(result, config.emit_chunk_debug) for result in chunk_results]
-        write_json(file_root / "chunks" / "chunk-manifest.json", metadata["chunk_results"])
+                    logger.info("Completed chunk %s", result.chunk_id)
+            else:
+                logger.error("Chunk %s failed: %s", result.chunk_id, result.error_message)
+                if failure_stage is None:
+                    failure_stage = result.error_stage or "transcription"
+                    failure_message = f"{result.chunk_id}: {result.error_message}"
 
         if any(result.status != "success" for result in chunk_results):
             raise PipelineStageError(
                 "transcription",
-                "One or more chunks failed. See chunk-manifest.json and logs/process.log for details.",
+                "One or more transcription units failed. See chunk-manifest.json and logs/process.log for details.",
             )
 
         final_transcript = merge_chunk_texts([result.transcript_text for result in chunk_results])
@@ -213,6 +181,163 @@ def _validate_input(config: STTConfig, input_path: Path) -> None:
         raise PipelineStageError("input_validation", f"Input file does not exist: {input_path}")
     if input_path.suffix.lower() != ".mp3":
         raise PipelineStageError("input_validation", f"Only .mp3 files are supported: {input_path}")
+
+
+def _process_direct_transcription(
+    *,
+    config: STTConfig,
+    input_path: Path,
+    file_root: Path,
+    logger: Any,
+) -> tuple[list[ChunkPlan], list[ChunkResult], dict[str, Any]]:
+    direct_chunk = ChunkPlan(
+        chunk_id="full-input",
+        index=0,
+        start_seconds=0.0,
+        duration_seconds=0.0,
+    )
+    chunking_metadata = {
+        "strategy": "direct-full-input",
+        "configured_chunk_workers": config.chunk_workers,
+        "resolved_chunk_workers": 1,
+        "resolved_transcription_workers": 1,
+    }
+
+    try:
+        logger.info("Submitting full-input duration=full-file")
+        backend = _initialize_backend(config, 1, logger)
+        transcription = backend.transcribe(
+            input_path,
+            progress_logger=logger,
+            progress_label="full-input",
+        )
+        duration_seconds = (
+            transcription.audio_duration_seconds
+            or _max_segment_end_seconds(transcription.segments)
+            or probe_duration_seconds(input_path)
+        )
+        direct_chunk = ChunkPlan(
+            chunk_id="full-input",
+            index=0,
+            start_seconds=0.0,
+            duration_seconds=round(duration_seconds, 3),
+        )
+        chunking_metadata["duration_ms"] = int(round(duration_seconds * 1000))
+        text = transcription.text.strip()
+        transcript_debug_path = None
+        debug_path = None
+        if config.emit_chunk_debug:
+            transcript_debug_path = "chunks/full-input.txt"
+            debug_path = "chunks/full-input.json"
+            write_text(file_root / transcript_debug_path, text)
+            write_json(file_root / debug_path, transcription.to_dict())
+        return (
+            [direct_chunk],
+            [
+                ChunkResult(
+                    chunk_id=direct_chunk.chunk_id,
+                    index=direct_chunk.index,
+                    start_seconds=direct_chunk.start_seconds,
+                    duration_seconds=direct_chunk.duration_seconds,
+                    status="success",
+                    transcript_text=text,
+                    transcript_path=transcript_debug_path,
+                    language=transcription.language,
+                    language_probability=transcription.language_probability,
+                    segment_count=len(transcription.segments),
+                    debug_path=debug_path,
+                )
+            ],
+            chunking_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Direct transcription failed")
+        return (
+            [direct_chunk],
+            [
+                ChunkResult(
+                    chunk_id=direct_chunk.chunk_id,
+                    index=direct_chunk.index,
+                    start_seconds=direct_chunk.start_seconds,
+                    duration_seconds=direct_chunk.duration_seconds,
+                    status="failed",
+                    error_stage=_classify_chunk_error(exc),
+                    error_message=str(exc),
+                )
+            ],
+            chunking_metadata,
+        )
+
+
+def _process_chunked_transcription(
+    *,
+    config: STTConfig,
+    input_path: Path,
+    file_root: Path,
+    work_root: Path,
+    logger: Any,
+) -> tuple[list[ChunkPlan], list[ChunkResult], dict[str, Any], float]:
+    normalized_path = work_root / "normalized" / "audio.wav"
+    logger.info("Normalizing audio to %s", normalized_path)
+    normalize_audio(
+        input_path=input_path,
+        output_path=normalized_path,
+        sample_rate_hz=config.sample_rate_hz,
+        audio_channels=config.audio_channels,
+    )
+
+    audio_duration_seconds = probe_duration_seconds(normalized_path)
+    chunk_plan, chunking_metadata = build_chunk_plans(normalized_path, config)
+    resolved_chunk_workers = resolve_parallel_workers(config.chunk_workers, len(chunk_plan))
+    resolved_transcription_workers = resolve_transcription_workers(config.model, len(chunk_plan))
+    chunking_metadata = {
+        **chunking_metadata,
+        "configured_chunk_workers": config.chunk_workers,
+        "resolved_chunk_workers": resolved_chunk_workers,
+        "resolved_transcription_workers": resolved_transcription_workers,
+    }
+    logger.info(
+        (
+            "Chunking produced %d chunk(s) with max_chunk_duration_ms=%s, "
+            "chunk_workers=%d, transcription_workers=%d"
+        ),
+        len(chunk_plan),
+        chunking_metadata["max_chunk_duration_ms"],
+        resolved_chunk_workers,
+        resolved_transcription_workers,
+    )
+
+    chunk_results: list[ChunkResult] = []
+    transcription_gate = BoundedSemaphore(value=resolved_transcription_workers)
+    with ThreadPoolExecutor(
+        max_workers=resolved_chunk_workers + 1,
+        thread_name_prefix="stt-chunk",
+    ) as executor:
+        backend_future = executor.submit(
+            _initialize_backend,
+            config,
+            resolved_transcription_workers,
+            logger,
+        )
+        futures = {
+            executor.submit(
+                _process_chunk,
+                chunk=chunk,
+                normalized_path=normalized_path,
+                file_root=file_root,
+                work_root=work_root,
+                config=config,
+                backend_future=backend_future,
+                transcription_gate=transcription_gate,
+                logger=logger,
+            ): chunk
+            for chunk in chunk_plan
+        }
+        for future in as_completed(futures):
+            chunk_results.append(future.result())
+
+    chunk_results.sort(key=lambda result: result.index)
+    return chunk_plan, chunk_results, chunking_metadata, audio_duration_seconds
 
 
 def _process_chunk(
@@ -313,10 +438,7 @@ def _classify_chunk_error(exc: Exception) -> str:
 
 def _initialize_backend(config: STTConfig, resolved_transcription_workers: int, logger: Any) -> Any:
     logger.info(
-        (
-            "Starting backend initialization concurrently with chunk extraction: "
-            "backend=%s model=%s transcription_workers=%d"
-        ),
+        "Starting backend initialization: backend=%s model=%s transcription_workers=%d",
         config.backend,
         config.model,
         resolved_transcription_workers,
@@ -331,3 +453,15 @@ def _serialize_chunk_result(result: ChunkResult, include_text: bool) -> dict[str
     if not include_text:
         payload.pop("transcript_text", None)
     return payload
+
+
+def _max_segment_end_seconds(segments: list[dict[str, Any]]) -> float | None:
+    max_end = 0.0
+    for segment in segments:
+        try:
+            segment_end = float(segment.get("end", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if segment_end > max_end:
+            max_end = segment_end
+    return max_end or None
